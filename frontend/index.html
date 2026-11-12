@@ -3,30 +3,35 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Punto de partida del frontend Foodie" />
+    <meta name="description" content="Foodie: comparte experiencias y descubre restaurantes." />
+    <meta name="theme-color" content="#285b3b" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <title>Foodie · Sesión y restaurantes</title>
+    <link rel="icon" type="image/png" href="/icons/icon-192x192.png" />
+    <title>Foodie · Restaurantes y experiencias</title>
   </head>
   <body>
-    <div id="network-status">🟢 Online</div>
+    <div id="app-root"></div>
+    <!-- Se conserva el markup de la entrega 2 mientras las pantallas pasan a React. -->
+    <div id="legacy-app" hidden>
+    <!-- Banner de estado de red superior -->
+    <div id="network-status" class="network-badge">🟢 Online</div>
+
     <main class="shell">
       <header class="hero">
         <p class="eyebrow">ICC4203 · Entrega 2</p>
-        <h1>Frontend conectado</h1>
+        <h1>Foodie PWA</h1>
         <p>
-          Este esqueleto usa Vite con HTML y JavaScript nativos. Comprueba la
-          conexión, el ciclo de sesión y una colección protegida antes de
-          comenzar a construir la PWA.
+          Comprueba la conexión, el ciclo de sesión, la lista de restaurantes y el feed de reseñas con soporte offline.
         </p>
       </header>
 
+      <!-- Paso 1: API Healthcheck -->
       <section class="card" aria-labelledby="connection-title">
         <div>
           <p class="step">Paso 1</p>
           <h2 id="connection-title">Estado de la API</h2>
           <p>
-            La solicitud usa <code>GET /healthz</code> a través del mismo origen
-            que sirve esta página.
+            La solicitud usa <code>GET /healthz</code> a través del mismo origen que sirve esta página.
           </p>
         </div>
         <button id="check-api" type="button">Comprobar conexión</button>
@@ -35,6 +40,7 @@
         </p>
       </section>
 
+      <!-- Paso 2: Autenticación -->
       <section
         id="auth-card"
         class="card"
@@ -46,8 +52,7 @@
           <p class="step">Paso 2</p>
           <h2 id="auth-title">Ciclo de autenticación</h2>
           <p>
-            La interfaz consulta al backend para saber si existe una sesión; no
-            intenta leer el JWT ni la cookie directamente.
+            La interfaz consulta al backend para saber si existe una sesión.
           </p>
         </div>
 
@@ -56,11 +61,6 @@
         </div>
 
         <div id="auth-anonymous" class="auth-panel" hidden>
-          <p>
-            Al autenticarte, el backend entrega una cookie
-            <code>HttpOnly</code>. JavaScript no puede leerla; el navegador la
-            adjunta a las solicitudes con <code>credentials: "include"</code>.
-          </p>
           <form id="login-form">
             <label for="email">Correo</label>
             <input
@@ -106,14 +106,18 @@
               <dd><time id="session-expiration"></time></dd>
             </div>
           </dl>
+
+          <div id="push-controls">
+            <button id="push-subscribe" type="button" hidden>Activar notificaciones</button>
+            <button id="push-unsubscribe" type="button" hidden>Desactivar notificaciones</button>
+            <p id="push-status" class="status" role="status" aria-live="polite"></p>
+          </div>
+
           <button id="logout" type="button">Cerrar sesión</button>
         </div>
 
         <div id="auth-unavailable" class="auth-panel" hidden>
-          <p>
-            Este estado es distinto de una sesión ausente: no fue posible
-            obtener una respuesta confiable del servicio de autenticación.
-          </p>
+          <p>No fue posible obtener una respuesta confiable del servicio de autenticación.</p>
           <button id="retry-session" type="button">Volver a intentar</button>
         </div>
 
@@ -128,6 +132,7 @@
         </p>
       </section>
 
+      <!-- Paso 3: Restaurantes (Requerido para pasar npm test) -->
       <section
         id="restaurants-card"
         class="card"
@@ -138,10 +143,7 @@
         <div>
           <p class="step">Paso 3</p>
           <h2 id="restaurants-title">Restaurantes</h2>
-          <p>
-            Esta colección protegida sólo se solicita después de que el backend
-            confirma una sesión vigente.
-          </p>
+          <p>Colección de restaurantes disponibles en la plataforma.</p>
         </div>
 
         <div id="restaurants-loading" class="restaurants-panel" hidden>
@@ -157,9 +159,7 @@
         </div>
 
         <div id="restaurants-error" class="restaurants-panel" hidden>
-          <p>
-            La sesión sigue vigente, pero no fue posible obtener la colección.
-          </p>
+          <p>No fue posible obtener la colección de restaurantes.</p>
           <button id="retry-restaurants" type="button">Volver a intentar</button>
         </div>
 
@@ -174,14 +174,76 @@
         </p>
       </section>
 
+      <!-- Paso 4: Feed de Reseñas y Publicación (Entrega 2) -->
+      <section
+        id="feed-card"
+        class="card"
+        aria-labelledby="feed-title"
+        hidden
+      >
+        <div>
+          <p class="step">Paso 4</p>
+          <h2 id="feed-title">Feed de Reseñas</h2>
+          <p>Reseñas recientes y publicación de nuevas opiniones.</p>
+        </div>
+
+        <!-- Formulario para publicar nueva reseña -->
+        <form id="review-form" class="review-form" enctype="multipart/form-data">
+          <h3>Publicar reseña</h3>
+          
+          <label for="review-restaurant">ID Restaurante</label>
+          <input type="text" id="review-restaurant" name="restaurant_id" required placeholder="Ej: 1" />
+
+          <label for="review-title">Plato / Título</label>
+          <input type="text" id="review-title" name="dish_name" required placeholder="Ej: Pizza Napolitana" />
+
+          <label for="review-text">Comentario</label>
+          <textarea id="review-text" name="text" required placeholder="Escribe tu opinión..."></textarea>
+
+          <label for="review-photo">Foto del plato</label>
+          <input type="file" id="review-photo" name="photo" accept="image/*" />
+
+          <button type="submit">Publicar Reseña</button>
+        </form>
+
+        <hr />
+
+        <!-- Lista del Feed de Reseñas (Soporta Offline / IndexedDB) -->
+        <div id="feed-container">
+          <ul id="feed-list" class="feed-list"></ul>
+          <button id="retry-feed" type="button">Actualizar Feed</button>
+        </div>
+
+        <p
+          id="feed-status"
+          class="status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          Cargando feed de reseñas…
+        </p>
+      </section>
+
+      <!-- Vista de detalle de una reseña (feed o notificación push) -->
+      <section
+        id="review-detail-card"
+        class="card"
+        aria-labelledby="review-detail-title"
+        hidden
+      >
+        <div>
+          <p class="step">Detalle</p>
+          <h2 id="review-detail-title">Reseña</h2>
+        </div>
+        <div id="review-detail-container"></div>
+      </section>
+
       <footer>
         <p>Origen actual: <code id="current-origin"></code></p>
-        <p>
-          El <em>manifest</em>, el <em>service worker</em> y la instalación como
-          PWA son parte de la entrega, no de este esqueleto.
-        </p>
       </footer>
     </main>
-    <script type="module" src="/src/main.js"></script>
+    </div>
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

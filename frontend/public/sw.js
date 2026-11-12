@@ -1,109 +1,100 @@
-const CACHE_NAME = 'foodie-shell-v1';
-// Lista de recursos estáticos indispensables que conforman el App Shell
-const APP_SHELL_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.json',
-  '/icons/icon-192x192.png',
-  '/icons/icon-512x512.png'
-];
+// CACHE_NAME and APP_SHELL_ASSETS are filled from the production output by
+// scripts/generate-sw.js. The empty defaults keep the Vite dev server valid.
+const CACHE_NAME = "foodie-shell-dev";
+const APP_SHELL_ASSETS = [];
 
-// 1. Instalación: Pre-cachear el App Shell
-self.addEventListener('install', (event) => {
+self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(APP_SHELL_ASSETS);
-    }).then(() => self.skipWaiting()) // Forzar activación de la nueva versión
+    caches.open(CACHE_NAME)
+      .then((cache) => Promise.all(APP_SHELL_ASSETS.map((asset) => cache.add(asset).catch(() => {}))))
+      .then(() => self.skipWaiting()),
   );
 });
 
-// 2. Activación: Limpieza de cachés de versiones anteriores
-self.addEventListener('activate', (event) => {
+self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cache) => {
-          if (cache !== CACHE_NAME) {
-            return caches.delete(cache);
-          }
-        })
-      );
-    }).then(() => self.clients.claim()) // Tomar control inmediato de las pestañas
+    caches.keys()
+      .then((cacheNames) => Promise.all(
+        cacheNames.filter((name) => name.startsWith("foodie-shell-") && name !== CACHE_NAME)
+          .map((name) => caches.delete(name)),
+      ))
+      .then(() => self.clients.claim()),
   );
 });
 
-// 3. Estrategia de Fetch: Manejar peticiones para modo Offline
-self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
+self.addEventListener("fetch", (event) => {
+  const request = event.request;
+  if (request.method !== "GET") return;
 
-  // IMPORTANTE: Las respuestas /api/* NO deben guardarse en Cache Storage (se manejan con IndexedDB)
-  if (url.pathname.startsWith('/api/')) {
-    return; // Permite que el navegador haga la petición normal a la red
-  }
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
+  if (url.pathname.startsWith("/@vite/") || url.pathname.startsWith("/@fs/") || url.search.includes("t=")) return;
 
-  // Para el App Shell y estáticos: Estrategia Stale-While-Revalidate o Cache First
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) {
-        // Devuelve de caché y actualiza en segundo plano
-        fetch(event.request).then((networkResponse) => {
-          if (networkResponse && networkResponse.status === 200) {
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, networkResponse));
-          }
-        }).catch(() => {/* Ignorar errores de red en segundo plano */});
-
-        return cachedResponse;
-      }
-
-      // Si no está en caché, va a la red
-      return fetch(event.request);
-    })
+    caches.match(request).then((cachedResponse) => {
+      if (cachedResponse) return cachedResponse;
+      return fetch(request).then((networkResponse) => {
+        if (!networkResponse || networkResponse.status !== 200) return networkResponse;
+        const responseToCache = networkResponse.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, responseToCache));
+        return networkResponse;
+      }).catch(() => {
+        if (request.mode === "navigate") {
+          return caches.match("/index.html").then((response) => response || caches.match("/"));
+        }
+        return new Response("Recurso no disponible sin conexión", {
+          status: 503,
+          statusText: "Service Unavailable",
+          headers: { "Content-Type": "text/plain" },
+        });
+      });
+    }),
   );
 });
 
-// 4. Evento Push (Base para cuando implementen el Backend de notificaciones)
-self.addEventListener('push', (event) => {
-  let data = { title: 'Nueva reseña', body: '¡Alguien publicó una nueva reseña de un plato!', url: '/' };
-  
+self.addEventListener("push", (event) => {
+  let data = {
+    title: "Nueva actividad",
+    body: "Hay una actividad nueva en tu comunidad.",
+    url: "/feed",
+  };
   if (event.data) {
     try {
-      data = event.data.json();
-    } catch (e) {
+      data = { ...data, ...event.data.json() };
+    } catch {
       data.body = event.data.text();
     }
   }
 
-  const options = {
+  event.waitUntil(self.registration.showNotification(data.title, {
     body: data.body,
-    icon: '/icons/icon-192x192.png',
-    badge: '/icons/icon-192x192.png',
-    data: { url: data.url || '/' }
-  };
-
-  event.waitUntil(
-    self.registration.showNotification(data.title, options)
-  );
+    icon: "/icons/icon-192x192.png",
+    data: { url: data.url || "/feed" },
+  }));
 });
 
-// 5. Evento Click en la Notificación
-self.addEventListener('notificationclick', (event) => {
+self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-
-  const targetUrl = event.notification.data.url;
+  const target = new URL(event.notification.data?.url || "/feed", self.location.origin);
+  const targetUrl = target.origin === self.location.origin
+    ? `${target.pathname}${target.search}${target.hash}`
+    : "/feed";
 
   event.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
-      // Si ya hay una ventana abierta de la app, enfocarla y navegar
-      for (let client of windowClients) {
-        if ('focus' in client) {
-          client.focus();
-          return client.navigate(targetUrl);
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
+      const sameOriginClient = windowClients.find((client) => {
+        try {
+          return new URL(client.url).origin === self.location.origin;
+        } catch {
+          return false;
         }
+      });
+
+      if (sameOriginClient) {
+        sameOriginClient.postMessage({ type: "NAVIGATE", url: targetUrl });
+        return sameOriginClient.focus();
       }
-      // Si no hay ventanas abiertas, abrir una nueva
-      if (clients.openWindow) {
-        return clients.openWindow(targetUrl);
-      }
-    })
+      return self.clients.openWindow(`${self.location.origin}${targetUrl}`);
+    }),
   );
 });

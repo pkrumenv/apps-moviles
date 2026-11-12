@@ -86,13 +86,21 @@ docs/        Enunciados de las entregas.
 frontend/    Aplicación cliente: la PWA de la entrega 2 y el frontend React de la entrega 3.
 backend/     API REST, backend serverless y su documentación técnica.
 gateway/     Proxy nginx para servir frontend y API bajo un mismo origen local.
+.github/     Workflow de despliegue en 4203.iccuandes.org.
 ```
 
 La documentación técnica para ejecutar, probar y desplegar la API comienza en
-[backend/README.md](backend/README.md). El punto de partida del cliente y su
-contrato de paths están en [frontend/README.md](frontend/README.md). La
+[backend/README.md](backend/README.md), que además mapea cada una de las
+diecisiete épicas hacia los endpoints que la sirven. El contrato completo de
+esos endpoints, organizado por épica, está en
+[backend/docs/api.md](backend/docs/api.md). El punto de partida del cliente y
+su contrato de paths están en [frontend/README.md](frontend/README.md). La
 arquitectura interna y las convenciones para extender la API se explican en
-[backend/DEVELOPER.md](backend/DEVELOPER.md).
+[backend/DEVELOPER.md](backend/DEVELOPER.md). El despliegue de la aplicación
+bajo el subdominio de cada grupo, a partir de la entrega 3, se describe en
+[DEPLOY.md](DEPLOY.md).
+
+La base y el procedimiento de despliegue de la entrega 4 se describen en la [guía de la base serverless](serverless/README.md).
 
 ## Uso del repositorio
 
@@ -100,9 +108,10 @@ Cada grupo de proyecto trabaja en su propio repositorio de GitHub, creado por el
 
 Una vez aceptada la invitación, los grupos podrán crear libremente ramas locales y remotas para avanzar en el desarrollo de su aplicación. Sin embargo,
 
-* Se considerará que la rama `main` contiene el último código estable que será revisado y evaluado por el ayudante.
+* Se considerará que la rama `main` contiene el último código estable que será revisado y evaluado por el ayudante, salvo en la entrega 4, que utilizará la rama `entrega-4`.
 * Pueden usar _issues_ de GitHub en su repositorio para mantener registro de bugs, o _features_ que requieran implementar.
-* Para las entregas, antes de la fecha límite, deben crear un _pull request_ e incluir al ayudante de proyecto que tengan asignado. El _pull request_ puede ser creado sin requerir una mezcla de código. Más bien, su fin es que el ayudante pueda revisar el trabajo y dejar su evaluación de cada aspecto en la entrega. El título del _pull request_ debe decir "Revisión Entrega X", en donde X es el número de la entrega.
+* Para las entregas 1 a 3, antes de la fecha límite, deben crear un _pull request_ e incluir al ayudante de proyecto que tengan asignado. El _pull request_ puede ser creado sin requerir una mezcla de código. Más bien, su fin es que el ayudante pueda revisar el trabajo y dejar su evaluación de cada aspecto en la entrega. El título del _pull request_ debe decir "Revisión Entrega X", en donde X es el número de la entrega.
+* Para la entrega 4, cada grupo debe crear y publicar la rama `entrega-4`. Se evaluará el último commit publicado en esa rama dentro del plazo anunciado en su [enunciado](docs/entrega4.md). No se requiere crear un _pull request_.
 
 Los profesores del curso continuarán trabajando sobre el repositorio con el código base durante el semestre, tanto para remediar posibles bugs como para proveer nuevas funciones relevantes para alguna de las entregas. Para que los grupos puedan actualizar su repositorio con nuevos lanzamientos del código base, deben agregar el repositorio de los profesores como origen remoto adicional:
 

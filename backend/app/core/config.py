@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     jwt_expiration_minutes: int = Field(default=10080, ge=1)
     cookie_secure: bool = False
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # Course deployments publish demo content so a reviewer can walk the
+    # application without registering. The seed only inserts missing fixtures,
+    # so it stays available outside development.
     seed_demo_data: bool = False
     media_storage_backend: MediaStorageBackend = MediaStorageBackend.LOCAL
     media_local_path: Path = Path("var/media")
@@ -40,6 +43,9 @@ class Settings(BaseSettings):
     media_s3_region: str | None = None
     media_s3_prefix: str = "foodie"
     media_presigned_url_expiration_seconds: int = Field(default=300, ge=1, le=3600)
+    vapid_public_key: str | None = None
+    vapid_private_key: str | None = None
+    vapid_subject: str = "mailto:foodie-notifications@example.com"
     model_config = SettingsConfigDict(extra="ignore")
 
     @field_validator("media_s3_bucket", "media_s3_region", mode="before")
@@ -70,8 +76,6 @@ class Settings(BaseSettings):
                 raise ValueError("JWT_SECRET must be supplied by the production platform")
             if not self.cookie_secure:
                 raise ValueError("COOKIE_SECURE must be enabled in production")
-            if self.seed_demo_data:
-                raise ValueError("SEED_DEMO_DATA must be disabled in production")
 
         return self
 

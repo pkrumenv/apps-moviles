@@ -1,150 +1,102 @@
-import base64
-import json
-from datetime import UTC, datetime
+"""The chronological view of what the people and restaurants you follow publish."""
+
 from uuid import UUID
 
-from sqlalchemy import and_, desc, or_, select
+from sqlalchemy import desc, or_, select, union_all
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.db.schema import photos, restaurant_follows, restaurants, reviews, user_follows, users
+from app.db.schema import restaurant_follows, reviews, user_follows
 from app.db.session import engine
-from app.services.reviews import PUBLIC_VISIBILITY, ReviewNotFoundError, ReviewStoreError
+from app.services.activity import (
+    ACTIVITY_SOURCES,
+    ActivitySource,
+    hydrate,
+    review_activity_statement,
+    review_object,
+)
+from app.services.cursors import decode_time_cursor, encode_time_cursor
+from app.services.reviews import ReviewNotFoundError, ReviewStoreError
+from app.services.visibility import PUBLIC
 
 
-class InvalidFeedCursorError(Exception):
-    pass
+def _followed_condition(source: ActivitySource, viewer_id: UUID):
+    """Written by someone the viewer follows, or at a restaurant they follow.
 
-
-def _utc_timestamp(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-def _encode_cursor(created_at: datetime, review_id: UUID) -> str:
-    value = json.dumps(
-        {"created_at": _utc_timestamp(created_at).isoformat(), "id": str(review_id)}
-    ).encode()
-    return base64.urlsafe_b64encode(value).decode().rstrip("=")
-
-
-def _decode_cursor(cursor: str) -> tuple[datetime, UUID]:
-    try:
-        decoded = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
-        value = json.loads(decoded)
-        created_at = datetime.fromisoformat(value["created_at"])
-        review_id = UUID(value["id"])
-        if created_at.tzinfo is None:
-            raise ValueError
-        return created_at.astimezone(UTC), review_id
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise InvalidFeedCursorError from error
-
-
-def _statement(viewer_id: UUID, *, detail: bool = False):
-    author = users.alias("author")
-    return (
-        select(
-            reviews.c.id,
-            reviews.c.dish_name,
-            reviews.c.text,
-            reviews.c.visibility,
-            reviews.c.created_at,
-            reviews.c.updated_at,
-            author.c.id.label("author_id"),
-            author.c.handle.label("author_handle"),
-            author.c.name.label("author_name"),
-            restaurants.c.id.label("restaurant_id"),
-            restaurants.c.name.label("restaurant_name"),
-            restaurants.c.address.label("restaurant_address"),
-            photos.c.id.label("photo_id"),
-            photos.c.content_type.label("photo_content_type"),
-        )
-        .select_from(
-            reviews.join(author, reviews.c.author_id == author.c.id)
-            .join(restaurants, reviews.c.restaurant_id == restaurants.c.id)
-            .join(photos, reviews.c.photo_id == photos.c.id)
-        )
-        .where(
-            or_(reviews.c.visibility == PUBLIC_VISIBILITY, reviews.c.author_id == viewer_id),
-            *(
-                ()
-                if detail
-                else (
-                    or_(
-                        reviews.c.author_id.in_(
-                            select(user_follows.c.followed_id).where(
-                                user_follows.c.follower_id == viewer_id
-                            )
-                        ),
-                        reviews.c.restaurant_id.in_(
-                            select(restaurant_follows.c.restaurant_id).where(
-                                restaurant_follows.c.user_id == viewer_id
-                            )
-                        ),
-                    ),
-                )
-            ),
-        )
+    One logical union and not two concatenated lists, so an activity that
+    matches both appears once.
+    """
+    return or_(
+        source.author_id.in_(
+            select(user_follows.c.followed_id).where(user_follows.c.follower_id == viewer_id)
+        ),
+        source.restaurant_id.in_(
+            select(restaurant_follows.c.restaurant_id).where(
+                restaurant_follows.c.user_id == viewer_id
+            )
+        ),
     )
 
 
-def _item(row):
-    created_at = _utc_timestamp(row["created_at"])
-    updated_at = _utc_timestamp(row["updated_at"])
-    return {
-        "type": "review",
-        "occurred_at": created_at,
-        "review": {
-            "id": row["id"],
-            "dish_name": row["dish_name"],
-            "text": row["text"],
-            "visibility": row["visibility"],
-            "created_at": created_at,
-            "updated_at": updated_at,
-            "author": {
-                "id": row["author_id"],
-                "handle": row["author_handle"],
-                "name": row["author_name"],
-            },
-            "restaurant": {
-                "id": row["restaurant_id"],
-                "name": row["restaurant_name"],
-                "address": row["restaurant_address"],
-            },
-            "photo": {
-                "id": row["photo_id"],
-                "content_type": row["photo_content_type"],
-                "content_url": f"/api/v1/photos/{row['photo_id']}/content",
-            },
-        },
-    }
+def _source_keys(source: ActivitySource, viewer_id: UUID, cursor: str | None, limit: int):
+    keys = source.keys(viewer_id).where(
+        # Only public activity reaches a feed.
+        source.visibility == PUBLIC,
+        # And never the viewer's own, not even at a restaurant they follow.
+        # A feed is what one hears about, and nobody hears about what they
+        # just published; their own activity lives in their profile. It is
+        # also the rule the notifications apply, where the author is always
+        # excluded, and the application should not answer the same question
+        # in two ways.
+        source.author_id != viewer_id,
+        _followed_condition(source, viewer_id),
+    )
+    if cursor:
+        published_at, activity_id = decode_time_cursor(cursor)
+        keys = source.after(keys, by="published", value=published_at, identifier=activity_id)
+    # Bounded before the union, and after the cursor: a branch cut without the
+    # cursor would hand back the same rows on every page.
+    return source.newest(keys, by="published", limit=limit)
 
 
 def get_feed(viewer_id: UUID, *, limit: int, cursor: str | None = None) -> dict:
-    statement = _statement(viewer_id).where(reviews.c.visibility == PUBLIC_VISIBILITY)
-    if cursor:
-        created_at, review_id = _decode_cursor(cursor)
-        statement = statement.where(
-            or_(
-                reviews.c.created_at < created_at,
-                and_(reviews.c.created_at == created_at, reviews.c.id < review_id),
-            )
-        )
-    statement = statement.order_by(desc(reviews.c.created_at), desc(reviews.c.id)).limit(limit + 1)
+    """One page of the feed, ordered by the instant each activity was published.
+
+    The sort keys of every source are unioned, ordered and cut in SQL, so the
+    page costs one bounded query however many classes of activity exist. Only
+    the rows that made the page are then read.
+
+    Each source contributes at most `limit + 1` keys, because no more than
+    that can reach the page and the surplus is what decides whether there is
+    another one. The decision is taken on the merged result and not on any
+    single branch.
+    """
+    key_sets = [_source_keys(source, viewer_id, cursor, limit + 1) for source in ACTIVITY_SOURCES]
+    combined = union_all(*key_sets).subquery("activity")
+    page = (
+        select(combined)
+        .order_by(desc(combined.c.published_at), desc(combined.c.id))
+        .limit(limit + 1)
+    )
+
     try:
         with engine.connect() as connection:
-            rows = connection.execute(statement).mappings().all()
+            keys = connection.execute(page).mappings().all()
+            has_next = len(keys) > limit
+            keys = keys[:limit]
+            items = hydrate(connection, viewer_id, keys)
     except SQLAlchemyError as error:
         raise ReviewStoreError from error
-    has_next = len(rows) > limit
-    rows = rows[:limit]
+
     return {
-        "items": [_item(row) for row in rows],
-        "next_cursor": _encode_cursor(rows[-1]["created_at"], rows[-1]["id"]) if has_next else None,
+        "items": items,
+        "next_cursor": (
+            encode_time_cursor(keys[-1]["published_at"], keys[-1]["id"]) if has_next else None
+        ),
     }
 
 
 def get_review(review_id: UUID, *, viewer_id: UUID) -> dict:
-    statement = _statement(viewer_id, detail=True).where(reviews.c.id == review_id)
+    statement = review_activity_statement(viewer_id).where(reviews.c.id == review_id)
     try:
         with engine.connect() as connection:
             row = connection.execute(statement).mappings().first()
@@ -152,4 +104,4 @@ def get_review(review_id: UUID, *, viewer_id: UUID) -> dict:
         raise ReviewStoreError from error
     if not row:
         raise ReviewNotFoundError
-    return _item(row)["review"]
+    return review_object(row)

@@ -9,6 +9,7 @@ from app.db import seed as seed_module
 from app.db.fixtures import (
     CUISINE_STYLES,
     DEMO_USERS,
+    PHOTO_FIXTURES,
     RESTAURANT_FOLLOWS,
     RESTAURANTS,
     REVIEW_FIXTURES,
@@ -105,9 +106,9 @@ def test_seed_creates_all_demo_data_once(monkeypatch, fixture_storage):
     monkeypatch.setattr(seed_module, "hash_password", lambda password: "test-password-hash")
 
     assert seed_module.seed() is True
-    assert len(fixture_storage.stored) == len(REVIEW_FIXTURES)
+    assert len(fixture_storage.stored) == len(REVIEW_FIXTURES) + len(PHOTO_FIXTURES)
     assert seed_module.seed() is False
-    assert len(fixture_storage.stored) == len(REVIEW_FIXTURES)
+    assert len(fixture_storage.stored) == len(REVIEW_FIXTURES) + len(PHOTO_FIXTURES)
 
     with engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(users)) == len(DEMO_USERS)
@@ -115,7 +116,9 @@ def test_seed_creates_all_demo_data_once(monkeypatch, fixture_storage):
             CUISINE_STYLES
         )
         assert connection.scalar(select(func.count()).select_from(restaurants)) == len(RESTAURANTS)
-        assert connection.scalar(select(func.count()).select_from(photos)) == len(REVIEW_FIXTURES)
+        assert connection.scalar(select(func.count()).select_from(photos)) == len(
+            REVIEW_FIXTURES
+        ) + len(PHOTO_FIXTURES)
         assert connection.scalar(select(func.count()).select_from(reviews)) == len(REVIEW_FIXTURES)
         assert connection.scalar(select(func.count()).select_from(user_follows)) == len(
             USER_FOLLOWS
@@ -211,8 +214,9 @@ def test_seed_maps_user_id_and_email_collisions_to_persisted_ids(monkeypatch, fi
 
     assert seed_module.seed() is True
     assert seed_module.seed() is False
-    assert len(fixture_storage.stored) == len(REVIEW_FIXTURES)
-    assert hashed_passwords == [DEMO_USERS[2].password]
+    assert len(fixture_storage.stored) == len(REVIEW_FIXTURES) + len(PHOTO_FIXTURES)
+    # Only the users that were not already persisted get hashed.
+    assert hashed_passwords == [fixture.password for fixture in DEMO_USERS[2:]]
     with engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(users)) == len(DEMO_USERS)
         assert (
@@ -223,9 +227,13 @@ def test_seed_maps_user_id_and_email_collisions_to_persisted_ids(monkeypatch, fi
             connection.scalar(select(users.c.handle).where(users.c.email == second.email))
             == "@existingemail"
         )
-        assert connection.execute(
-            select(user_follows.c.follower_id, user_follows.c.followed_id)
-        ).one() == (first.id, second_persisted_id)
+        persisted_follows = set(
+            connection.execute(select(user_follows.c.follower_id, user_follows.c.followed_id))
+        )
+        assert len(persisted_follows) == len(USER_FOLLOWS)
+        # The follow whose followed account collided by email points at the
+        # row that was already there, not at the fixture UUID.
+        assert (first.id, second_persisted_id) in persisted_follows
         followed_review_authors = set(
             connection.scalars(
                 select(reviews.c.author_id).where(
@@ -251,6 +259,7 @@ def test_seed_maps_restaurant_identity_collision_to_persisted_id(monkeypatch, fi
                 id=persisted_id,
                 name=fixture.name,
                 normalized_name=seed_module.normalize_restaurant_text(fixture.name),
+                search_name=seed_module.normalize_restaurant_search_text(fixture.name),
                 address=fixture.address,
                 normalized_address=seed_module.normalize_restaurant_text(fixture.address),
                 identity_key=seed_module.restaurant_identity_key(fixture.name, fixture.address),
@@ -261,7 +270,7 @@ def test_seed_maps_restaurant_identity_collision_to_persisted_id(monkeypatch, fi
 
     assert seed_module.seed() is True
     assert seed_module.seed() is False
-    assert len(fixture_storage.stored) == len(REVIEW_FIXTURES)
+    assert len(fixture_storage.stored) == len(REVIEW_FIXTURES) + len(PHOTO_FIXTURES)
     with engine.connect() as connection:
         assert connection.execute(
             select(restaurant_follows.c.user_id, restaurant_follows.c.restaurant_id)

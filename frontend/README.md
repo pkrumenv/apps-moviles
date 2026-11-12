@@ -1,11 +1,23 @@
-# Frontend
+# Frontend: Vite, React y PWA
 
-Este directorio contiene la aplicación cliente del proyecto, que los grupos desarrollan a lo largo del semestre.
+La aplicación activa usa React, React Router y MUI sobre Vite. `src/main.jsx`
+monta el router y el contexto compartido de sesión; `src/app/theme.js` es el
+único theme MUI. Los módulos `api.js` y `offline-feed.js` conservan el contrato
+relativo `/api/v1`, las cookies de sesión y el snapshot offline asociado a una
+cuenta.
 
-* **Entrega 2**: una PWA (_Progressive Web Application_) construida con HTML, CSS y JavaScript, que consume los _endpoints_ del backend entregado por el equipo docente. El foco está en el consumo de la API y en las capacidades propias de una PWA (_manifest_, _service worker_, instalación en el dispositivo, funcionamiento sin conexión).
-* **Entrega 3**: la implementación completa del frontend con React, sobre el diseño elaborado en la entrega 1.
+`npm run build` compila Vite y luego genera el precache del service worker a
+partir de los archivos producidos en `dist/`. El clic de una notificación envía
+un mensaje al cliente abierto para que React Router navegue sin recargar la app.
 
-Los enunciados de cada entrega, en el directorio [`docs`](../docs), precisan el alcance del trabajo y los criterios de evaluación. Reemplacen el contenido de este archivo por las instrucciones de instalación y ejecución de su aplicación a medida que la desarrollen.
+Las entregas anteriores dejaron el prototipo vanilla en `src/main.js` y el
+markup anterior bajo `#legacy-app` mientras se migra la interfaz.
+
+## Ejecución local
+
+Desde este directorio instala las dependencias con `npm ci` y ejecuta `npm run
+dev`. Para producción, usa `npm run build`; el resultado queda en `dist/`.
+
 # Frontend: Vite, HTML y JavaScript
 
 Este directorio contiene el punto de partida de la aplicación cliente. En la
@@ -20,12 +32,19 @@ consumo de una colección protegida:
 - `GET /healthz`, para comprobar la conectividad;
 - `GET /api/v1/auth/session`, para reconstruir la interfaz al cargar la página;
 - `POST /api/v1/auth/login`, para iniciar una sesión;
-- `GET /api/v1/restaurants?limit=20&offset=0`, para mostrar la primera página de
-  restaurantes únicamente después de confirmar la sesión; y
+- `GET /api/v1/restaurants?limit=20`, que responde `{ items, next_cursor }`,
+  para mostrar la primera página de restaurantes únicamente después de
+  confirmar la sesión; y
 - `POST /api/v1/auth/logout`, para revocarla y eliminar la cookie.
 
 No incluye `manifest`, `service worker`, soporte offline ni instalación como
 PWA. Esos elementos forman parte del trabajo de los grupos en la entrega 2.
+
+**El contrato completo de la API, organizado por épica, está en
+[backend/docs/api.md](../backend/docs/api.md).** Ahí está qué recibe y qué
+devuelve cada endpoint, y las decisiones del backend que cambian lo que el
+cliente tiene que escribir: la paginación por cursor, la regla de visibilidad,
+las formas que se repiten y el reparto entre `404` y `422`.
 
 ## Contrato de feed para la Entrega 2
 
@@ -126,41 +145,68 @@ Los valores del backend se asignan con `textContent` y se estructuran con
 por qué [`textContent`](https://developer.mozilla.org/docs/Web/API/Node/textContent)
 es apropiado para tratar la respuesta como texto y no como markup ejecutable.
 
-## Contrato para crear una reseña
+## Contrato para publicar una fotografía y reseñarla
 
-El esqueleto no implementa el formulario de reseña: construir esa experiencia
-es parte de la entrega. El backend ya ofrece `POST /api/v1/reviews` autenticado
-y recibe `restaurant_id`, `dish_name`, `text` y una única `photo` como
-`multipart/form-data`. En JavaScript se construye con
+El esqueleto no implementa ninguno de los dos formularios: construir esa
+experiencia es parte de la entrega. Son **dos pasos** que la interfaz puede
+encadenar, porque publicar la foto de un plato es una acción completa y
+reseñarla es otra.
+
+Primero la fotografía. `POST /api/v1/photos` es autenticado y recibe
+`restaurant_id`, `kind`, `dish_name`, `visibility`, el archivo y un `caption`
+opcional como `multipart/form-data`, que en JavaScript se construye con
 [`FormData`](https://developer.mozilla.org/docs/Web/API/FormData):
 
 ```js
 const body = new FormData();
 body.append("restaurant_id", restaurantId);
+body.append("kind", "dish");
 body.append("dish_name", dishName);
-body.append("text", reviewText);
+body.append("visibility", "public");
 body.append("photo", fileInput.files[0]);
 
-const response = await fetch("/api/v1/reviews", {
+const photo = await fetch("/api/v1/photos", {
   method: "POST",
   credentials: "include",
   body,
-});
+}).then((response) => response.json());
 ```
 
 No definas el header `Content-Type` manualmente: el navegador debe agregar el
 `boundary` propio de ese `FormData`. Antes de enviar, la interfaz puede ayudar
 comprobando que exista exactamente un archivo y que su tipo/tamaño estén dentro
 del contrato documentado, pero el backend siempre repite la validación. La
-respuesta incluye `photo.content_url`, que es relativa, estable y requiere la
-misma cookie; así funciona con localhost, IP, mDNS, el futuro subdominio y
+respuesta incluye `content_url`, que es relativa, estable y requiere la misma
+cookie; así funciona con localhost, IP, mDNS, el subdominio del grupo y
 CloudFront sin incrustar hosts en el código.
+
+Después la reseña, sobre esa fotografía, en JSON:
+
+```js
+await fetch("/api/v1/reviews", {
+  method: "POST",
+  credentials: "include",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    photo_id: photo.id,
+    rating: 4,
+    text: reviewText,
+    visibility: "public",
+  }),
+});
+```
+
+La reseña la escribe quien tomó la fotografía, y nunca puede ser más visible
+que ella: privada sobre una foto pública se acepta, pública sobre una privada
+responde `422`. Para subir varias fotografías del menú o de las instalaciones
+en un mismo acto, repite el mismo `upload_group` en cada solicitud.
 
 La misma convención sirve para las siguientes etapas:
 
 - **Entrega 3:** nginx sirve el build estático de React en `/` y mantiene el
   proxy `/api/*` hacia el backend del monolito Docker, bajo el subdominio del
-  grupo en `4203.iccuandes.org`.
+  grupo en `4203.iccuandes.org`. El procedimiento está en
+  [DEPLOY.md](../DEPLOY.md).
 - **Entrega 4:** CloudFront usa el build estático como origen predeterminado y
   un comportamiento `/api/*` hacia API Gateway y Lambda. CloudFront permite
   [varios orígenes y routing por path](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesCacheBehavior.html).
@@ -188,7 +234,7 @@ La API sigue disponible directamente en <http://localhost:8000> para
 diagnóstico, pero el frontend no debe construir URLs con ese puerto.
 
 Para abrir la aplicación desde un teléfono con HTTPS, sigue la guía de
-[HTTPS local y acceso desde un teléfono](../backend/README.md#https-local-y-acceso-desde-un-teléfono).
+[HTTPS local y acceso desde un teléfono](../backend/docs/https-local.md).
 Los puntos de entrada serán `https://localhost:5173` en el computador y, por
 ejemplo, `https://192.168.1.40:5173` desde otro dispositivo.
 
@@ -205,6 +251,19 @@ cd frontend
 npm install
 npm run dev
 ```
+
+Para explorar el mapa localmente, crea `frontend/.env.local` y define la clave
+restringida para desarrollo:
+
+```dotenv
+VITE_GOOGLE_MAPS_API_KEY=tu_clave_de_desarrollo
+```
+
+Reinicia Vite después de cambiar variables `VITE_*`. La clave se entrega al
+navegador, así que debe tener restricciones de sitio autorizando el origen
+local y no debe ser una clave privada de servidor. Sin clave, la búsqueda por
+nombre y el resto de la aplicación siguen disponibles; el mapa muestra un
+mensaje de configuración.
 
 Abre <http://localhost:5173>. Detén primero el gateway de Compose, porque ambos
 usan el mismo puerto del host. Durante el desarrollo, Vite también hace proxy

@@ -1,0 +1,19 @@
+{
+  "handler": "notifications.handler",
+  "files": [
+    "app/__init__.py",
+    "app/core/__init__.py",
+    "app/core/config.py",
+    "app/db/__init__.py",
+    "app/db/engine.py",
+    "app/db/retry.py",
+    "app/db/schema.py",
+    "app/db/session.py",
+    "app/extensions.py",
+    "app/notification_event.py",
+    "app/services/__init__.py",
+    "app/services/push_subscriptions.py",
+    "notifications.py"
+  ],
+  "requirements": "requirements/notifications.txt"
+}

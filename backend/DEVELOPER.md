@@ -3,7 +3,48 @@
 Esta guía explica cómo está construido el backend y cómo extenderlo sin romper
 sus contratos de ejecución local ni su futura migración a AWS. Para instalar
 herramientas, iniciar Compose, ejecutar pruebas o configurar HTTPS, comienza en
-el [README del backend](README.md).
+el [README del backend](README.md). Para el contrato de cada endpoint, el
+[contrato de la API por épica](docs/api.md).
+
+Aquí está el **porqué**: qué decisión hay detrás de cada forma, y qué se rompe
+si se cambia sin querer.
+
+## Índice
+
+- [Objetivos arquitectónicos](#objetivos-arquitectónicos)
+- [Mapa de la arquitectura](#mapa-de-la-arquitectura)
+- [Stack y función de cada componente](#stack-y-función-de-cada-componente)
+- [Organización del código](#organización-del-código)
+  - [Límites entre módulos](#límites-entre-módulos)
+- [Dos entrypoints, una sola aplicación](#dos-entrypoints-una-sola-aplicación)
+- [Ciclo de autenticación](#ciclo-de-autenticación)
+  - [Registro de cuentas](#registro-de-cuentas)
+  - [Cookies y CSRF](#cookies-y-csrf)
+- [Recurso de restaurantes](#recurso-de-restaurantes)
+  - [Fixtures y seed](#fixtures-y-seed)
+- [Reseñas y almacenamiento de fotografías](#reseñas-y-almacenamiento-de-fotografías)
+  - [Feed de reseñas](#feed-de-reseñas)
+- [Ficha del restaurante y visibilidad de las fotografías](#ficha-del-restaurante-y-visibilidad-de-las-fotografías)
+  - [Personas conocidas, en una sola pasada](#personas-conocidas-en-una-sola-pasada)
+  - [Fotografías: un solo camino de subida](#fotografías-un-solo-camino-de-subida)
+  - [La conversación de una fotografía, que no es actividad](#la-conversación-de-una-fotografía-que-no-es-actividad)
+  - [Evaluaciones y la excepción del resumen](#evaluaciones-y-la-excepción-del-resumen)
+- [Perfil de usuario y regla de visibilidad](#perfil-de-usuario-y-regla-de-visibilidad)
+  - [El envelope de actividad y cómo se agrega una clase](#el-envelope-de-actividad-y-cómo-se-agrega-una-clase)
+  - [Los dos instantes del envelope](#los-dos-instantes-del-envelope)
+  - [Cursores](#cursores)
+- [Notificaciones dirigidas](#notificaciones-dirigidas)
+- [Configuración](#configuración)
+- [Persistencia con SQLAlchemy Core](#persistencia-con-sqlalchemy-core)
+  - [Engine, conexiones y transacciones](#engine-conexiones-y-transacciones)
+- [Esquema y migraciones con Alembic](#esquema-y-migraciones-con-alembic)
+- [Cómo agregar un endpoint](#cómo-agregar-un-endpoint)
+- [Estrategia de pruebas](#estrategia-de-pruebas)
+- [Portabilidad hacia Lambda y Aurora DSQL](#portabilidad-hacia-lambda-y-aurora-dsql)
+- [Convenciones que deben preservarse](#convenciones-que-deben-preservarse)
+- [Referencias oficiales](#referencias-oficiales)
+
+---
 
 ## Objetivos arquitectónicos
 
@@ -22,6 +63,8 @@ Las decisiones centrales son:
 - ocultar la elección PostgreSQL/Aurora DSQL detrás de la creación del engine;
 - ejecutar migraciones fuera del runtime de Lambda; y
 - probar la misma aplicación tanto como ASGI local como handler de Lambda.
+
+[↑ Índice](#índice)
 
 ## Mapa de la arquitectura
 
@@ -51,6 +94,8 @@ nginx, Vite y TLS pertenecen al entorno que rodea la API, no a su lógica. nginx
 presenta frontend y backend bajo un mismo origen; internamente envía `/api/*`,
 `/healthz`, `/docs` y `/openapi.json` a FastAPI.
 
+[↑ Índice](#índice)
+
 ## Stack y función de cada componente
 
 | Tecnología | Responsabilidad en el proyecto | Ubicación principal |
@@ -76,29 +121,50 @@ Uvicorn es el servidor que recibe HTTP y la ejecuta localmente. En AWS tampoco
 se inicia Uvicorn; Mangum traduce el evento de API Gateway al protocolo ASGI
 que entiende la misma aplicación.
 
+[↑ Índice](#índice)
+
 ## Organización del código
 
 ```text
 backend/
 ├── app/
 │   ├── main.py             composición de FastAPI y entrypoints ASGI/Lambda
-│   ├── api/
-│   │   ├── auth.py         contratos HTTP, respuestas y cookies
+│   ├── api/                contrato HTTP: paths, códigos, cookies, errores
 │   │   ├── dependencies.py sesión actual y protección de origen
-│   │   ├── restaurants.py  contrato HTTP del CRUD protegido
-│   │   └── reviews.py      creación multipart y entrega de fotografías
-│   ├── schemas/
-│   │   ├── restaurants.py  modelos Pydantic del CRUD
-│   │   └── reviews.py      respuesta pública de reseña y fotografía
+│   │   ├── auth.py         registro, sesión y cierre
+│   │   ├── countries.py    catálogo de nacionalidades
+│   │   ├── restaurants.py  colección, ficha, mapa, cercanía, seguir
+│   │   ├── photos.py       publicación y entrega de fotografías
+│   │   ├── reviews.py      reseña sobre una fotografía existente
+│   │   ├── evaluations.py  evaluación y criterios
+│   │   ├── visits.py       check-in
+│   │   ├── comments.py     conversación de una fotografía
+│   │   ├── users.py        perfil, actividad, búsqueda y seguir
+│   │   └── feed.py         feed y detalle de reseña
+│   ├── schemas/            modelos Pydantic reutilizables
+│   │   ├── activity.py     envelope de actividad y resumen de persona
+│   │   └── …               uno por recurso
 │   ├── media/
 │   │   └── storage.py      contrato y adaptadores local/S3
 │   ├── core/
 │   │   ├── config.py       configuración y validaciones por ambiente
-│   │   └── security.py     passwords, creación y validación de JWT
-│   ├── services/
+│   │   ├── security.py     passwords, creación y validación de JWT
+│   │   ├── countries.py    catálogo ISO 3166-1 alfa-2
+│   │   └── rating_criteria.py  criterios de evaluación, como dato del código
+│   ├── services/           casos de uso; ninguno depende de objetos HTTP
+│   │   ├── visibility.py   la regla de visibilidad, en un solo lugar
+│   │   ├── cursors.py      códec de cursor opaco
+│   │   ├── activity.py     registro de orígenes de actividad y envelope
+│   │   ├── notifications.py  a quién avisar; enviar es del grupo
 │   │   ├── auth.py         caso de uso y sesiones persistentes
 │   │   ├── restaurants.py  reglas, consultas y transacciones del recurso
-│   │   └── reviews.py      validación, persistencia y compensación de medios
+│   │   ├── photos.py       único camino de subida, galería y autorización
+│   │   ├── reviews.py      validación y persistencia de una reseña
+│   │   ├── evaluations.py  calificaciones por criterio y resumen
+│   │   ├── visits.py       check-in y sus dos instantes
+│   │   ├── comments.py     thread de dos niveles
+│   │   ├── users.py        perfil, actividad, búsqueda y seguimiento
+│   │   └── feed.py         unión de orígenes ordenada por publicación
 │   └── db/
 │       ├── engine.py       engines PostgreSQL/DSQL y políticas de pool
 │       ├── fixtures.py     datos docentes deterministas, sin inserciones
@@ -108,6 +174,7 @@ backend/
 │       └── seed.py         datos de demostración optativos
 ├── migrations/             configuración y revisiones de Alembic
 ├── tests/                  suite automatizada
+├── docs/                   contrato de la API, HTTPS local, plataformas, AWS
 ├── entrypoint.sh           migración, seed y Uvicorn en el contenedor local
 └── pyproject.toml          paquete, dependencias y herramientas
 ```
@@ -135,6 +202,8 @@ son pasos relacionados que `app/services/auth.py` coordina. El router conserva
 las decisiones de HTTP y la dependencia convierte una sesión de aplicación en
 autorización reutilizable para otros recursos.
 
+[↑ Índice](#índice)
+
 ## Dos entrypoints, una sola aplicación
 
 `app/main.py` exporta dos objetos:
@@ -150,6 +219,8 @@ patrón de composición con `APIRouter`.
 El endpoint `/healthz` y una prueba con un evento HTTP API v2 aseguran que ambos
 caminos mantengan el mismo comportamiento. La arquitectura AWS completa está
 en [Despliegue en AWS Lambda y Aurora DSQL](docs/aws-lambda.md).
+
+[↑ Índice](#índice)
 
 ## Ciclo de autenticación
 
@@ -191,6 +262,52 @@ La caducación es absoluta y se representa en tres lugares coordinados:
 La configuración inicial no renueva sesiones ni usa refresh tokens. Varias
 sesiones por usuario son válidas y logout revoca sólo la actual.
 
+### Registro de cuentas
+
+`POST /api/v1/auth/register` es la única escritura pública del API. Conserva
+`require_trusted_origin`, porque lo que la protección evita —que otro sitio
+provoque una escritura con las credenciales del navegador— no depende de que
+exista una sesión.
+
+`register_user` normaliza, hashea y crea la cuenta junto con su sesión en una
+sola transacción. El orden importa: el hash Argon2 se calcula **antes** de
+abrir la transacción, para no sostenerla durante la operación más lenta del
+recorrido y para que un registro rechazado cueste aproximadamente lo mismo que
+uno aceptado.
+
+La normalización vive en el servicio, no en el schema, y el modelo Pydantic la
+invoca desde sus validadores. Así la regla se prueba sin HTTP y la comparten
+las épicas que después buscan por handle:
+
+- `normalize_handle` retira una arroba inicial y baja a minúsculas. La arroba
+  es presentación; almacenarla obligaría a limpiarla en cada comparación.
+- `is_valid_handle` aplica `^[a-z0-9_]{3,30}$` sobre la forma normalizada.
+- `normalize_email` baja a minúsculas.
+
+La unicidad se resuelve normalizando al escribir, sin índice funcional, porque
+Aurora DSQL no los admite. Es la misma estrategia de `normalized_name` en
+restaurantes.
+
+El conflicto se clasifica antes de insertar, con una consulta que busca el
+correo o el handle. Cuando ambos colisionan con filas distintas gana el correo,
+que es la identidad de inicio de sesión y por tanto lo primero que la persona
+tiene que cambiar. Si una inscripción simultánea gana la carrera, la violación
+de unicidad no dice cuál índice falló, de modo que el servicio vuelve a
+preguntar y traduce el resultado; si esa segunda consulta no encuentra
+conflicto, la falla era de otra naturaleza y se traduce a 503.
+
+`app/core/countries.py` declara las nacionalidades como dato del código base y
+no como tabla. Los países cambian poco, una tabla que nadie edita agrega una
+migración y un seed sin agregar una capacidad, y tenerlo en el módulo permite
+que el schema valide un código sin consultar la base. El módulo documenta cómo
+se regeneró la lista y qué códigos de ICU quedaron fuera por no ser
+asignaciones oficiales de ISO 3166-1.
+
+No hay endpoint de disponibilidad de handle. Sería público, porque el registro
+lo es, y daría un oráculo para enumerar los handles de la aplicación sin tener
+cuenta; el `409` del registro entrega la misma información en el momento en que
+el formulario la necesita.
+
 ### Cookies y CSRF
 
 `HttpOnly` evita que JavaScript lea el JWT; `Secure` restringe su transporte a
@@ -199,6 +316,8 @@ adjuntan automáticamente, login y logout además validan `Origin`. Se acepta el
 origen del request —incluido IP o mDNS bajo el gateway— y los valores explícitos
 de `CORS_ORIGINS`; un navegador que declare una solicitud cross-site se rechaza
 con 403. Clientes no navegador pueden omitir `Origin`.
+
+[↑ Índice](#índice)
 
 ## Recurso de restaurantes
 
@@ -214,6 +333,57 @@ como el patrón N+1. `limit` está acotado a 100 y `offset` nunca es negativo. L
 [documentación de parámetros de consulta de
 FastAPI](https://fastapi.tiangolo.com/tutorial/query-params-str-validations/)
 explica cómo estas restricciones pasan además al esquema OpenAPI.
+
+Las dos formas normalizadas del nombre no son redundantes. `normalized_name`
+conserva los diacríticos, porque la detección de duplicados tiene que seguir
+distinguiendo «Café Perú» de «Cafe Peru» como dos nombres que dos personas
+escribieron distinto. `search_name` los pliega, porque quien escribe «cafe»
+espera encontrar «Café». Una sola columna obligaría a elegir cuál de las dos
+cosas se rompe.
+
+La búsqueda usa `LIKE` sobre `search_name` y escapa los comodines que el
+usuario haya escrito; un `%` sin escapar devolvería la colección completa. No
+se usan trigramas ni búsqueda de texto completo: atan el proyecto a PostgreSQL
+y la entrega 4 migra a Aurora DSQL.
+
+El orden de la colección es alfabético sobre `search_name`, que es la columna
+que el índice sirve, y no por relevancia: un cursor reanuda desde una posición
+que no puede depender del término buscado.
+
+La consulta del mapa se resuelve con comparaciones sobre `latitude` y
+`longitude` y el índice compuesto `ix_restaurants_location`. No se usa
+PostGIS: la entrega 4 migra a Aurora DSQL, que no lo ofrece. Las comparaciones
+quedan sin funciones que envuelvan las columnas, que es la condición para que
+el índice pueda servirlas.
+
+La búsqueda por cercanía usa el mismo índice. El rectángulo que circunscribe
+el círculo acota el escaneo, y recién sobre esos candidatos se mide la
+distancia exacta, que es la que decide pertenencia y orden. `circumscribing_bounds`
+es una función aparte justamente para poder probar sin base de datos sus dos
+bordes: un círculo que alcanza un polo no tiene cota de meridiano, y uno
+cercano al antimeridiano devuelve una arista oeste al este de la arista este,
+que es como la condición reconoce el cruce.
+
+La distancia se calcula en Python y no en SQL. Así la consulta queda con
+comparaciones simples que PostgreSQL, Aurora DSQL y el SQLite de las pruebas
+sirven igual, sin depender de funciones trigonométricas cuya disponibilidad
+difiere entre motores. Lo que eso cuesta es traer las filas del rectángulo, y
+el radio máximo es lo que acota ese conjunto.
+
+El límite de área se valida en el servicio y no sólo en el schema, para que la
+regla sea comprobable sin HTTP. La medida está en grados cuadrados y es
+deliberadamente burda: es una barrera contra quien se alejó hasta ver un
+continente, no una medición de superficie.
+
+`truncated` se determina pidiendo un resultado más que el límite, sin contar
+la tabla. El orden es por coordenada, que es el que el índice ya produce, de
+modo que una respuesta truncada es la parte sur del rectángulo y no una
+muestra representativa. Esa es precisamente la razón de anunciarla.
+
+La migración `0100` copia la normalización en lugar de importarla del
+servicio. Una migración registra lo que se calculó cuando corrió; importar
+código de aplicación dejaría que un cambio posterior a esa función redefina el
+historial en silencio.
 
 Para detectar duplicados, la aplicación normaliza nombre y dirección mediante
 Unicode NFKC, colapsa whitespace y aplica `casefold`. Luego calcula una clave
@@ -240,7 +410,12 @@ antes de reutilizar el CRUD en un despliegue real.
 ### Fixtures y seed
 
 `app/db/fixtures.py` declara tres usuarios docentes, ocho estilos y diez
-restaurantes ficticios con UUID estables. `app/db/seed.py` contiene la
+restaurantes ficticios con UUID estables. Los usuarios se declaran en la misma
+forma que escribe el registro: handle sin arroba y en minúsculas, nacionalidad
+como código ISO 3166-1 alfa-2. Como el seed nunca actualiza una fila existente,
+una base poblada con el formato anterior conserva sus handles con arroba; el
+enunciado de la entrega 3 indica recrear la base de desarrollo al mezclar, y
+eso los repone. `app/db/seed.py` contiene la
 inserción. Separar datos y mecanismo hace visible qué contenido es docente y
 permite probar la idempotencia sin mezclarlo con el runtime del API.
 
@@ -248,8 +423,11 @@ permite probar la idempotencia sin mezclarlo con el runtime del API.
 usuarios, el seed busca tanto UUID como correo; para estilos y restaurantes,
 UUID, slug e identidad antes de insertar. Nunca actualiza una fila ya existente
 ni reemplaza asociaciones: reiniciar Compose conserva cambios de los
-estudiantes. `Settings` rechaza esta opción en producción y Lambda no ejecuta
-el entrypoint local, por lo que las fixtures no forman parte del bootstrap AWS.
+estudiantes. La opción sigue disponible con `ENVIRONMENT=production`, porque el
+despliegue del curso publica contenido de demostración para que el ayudante
+recorra la aplicación sin registrarse; véase [DEPLOY.md](../DEPLOY.md). Lambda
+no ejecuta el entrypoint local, por lo que las fixtures no forman parte del
+bootstrap AWS.
 
 Cuando una fixture coincide por correo o identidad con una fila que usa otro
 UUID, el seed conserva esa fila y mapea hacia su UUID persistido las relaciones
@@ -268,6 +446,8 @@ abre como streams y llama a `MediaStorage.store`; `photos.storage_key` siempre
 recibe la clave opaca que entregue el proveedor. Si la transacción SQL falla,
 el seed elimina los objetos que alcanzó a crear. Reejecutarlo no sobrescribe
 filas ni vuelve a cargar las fotografías ya asociadas a una reseña fixture.
+
+[↑ Índice](#índice)
 
 ## Reseñas y almacenamiento de fotografías
 
@@ -335,6 +515,372 @@ evoluciones posteriores. El header `Location` apunta a
 `/api/v1/reviews/{id}`, implementado por el router de feed como recurso de
 detalle.
 
+[↑ Índice](#índice)
+
+## Ficha del restaurante y visibilidad de las fotografías
+
+La visibilidad de una fotografía es una columna de `photos` desde la migración
+`0102`, y no una deducción a partir de la reseña que la acompañe. Deducirla
+deja de funcionar apenas exista una fotografía sin reseña —que es lo que
+introduce la épica 8—, y un join interno contra `reviews` en la galería habría
+tenido que deshacerse entonces, ocultando mientras tanto fotografías
+legítimas. `resolve_photo` autoriza contra esa columna, de modo que la galería
+y `/content` no puedan discrepar.
+
+La reseña conserva su propia `visibility`. Cada columna gobierna lo suyo: la
+de la reseña decide si el item de actividad aparece en el feed y en el perfil,
+la de la fotografía decide la galería y el contenido. Mientras la creación de
+reseñas fuerce visibilidad pública, la fotografía copia la de su reseña; la
+épica 10 decide si las colapsa cuando la elección llegue al formulario.
+
+La ficha resuelve cuatro consultas acotadas: la fila con sus estilos, los
+contadores con las dos direcciones del seguimiento como subconsultas
+correlacionadas, el resumen de evaluaciones y las personas conocidas que
+estuvieron ahí. Ninguna depende del tamaño del historial del restaurante, y
+por eso la galería quedó fuera. `_evaluation_summary` existe como punto único
+identificado: cuando la épica 11 tenga evaluaciones, sólo esa función cambia,
+y ni el router ni la forma de la respuesta lo hacen.
+
+### Personas conocidas, en una sola pasada
+
+`_known_visitors_statement` agrupa por persona las visitas públicas del
+restaurante cuyo autor está entre los seguidos del observador, y proyecta el
+máximo de `occurred_at` de cada grupo. Agrupar y no recorrer seguidos es la
+decisión: una consulta por persona seguida haría la ficha más lenta
+justamente para quien sigue a más gente, que es para quien el bloque existe.
+
+El total sale de la misma pasada, con `count()` como función de ventana sobre
+el resultado agrupado. La ventana se evalúa antes del `LIMIT`, así que el
+número cuenta a todas las personas aunque la lista se corte en
+`MAXIMUM_KNOWN_VISITORS`. La alternativa —una subconsulta de conteo— vuelve a
+recorrer las visitas del restaurante para responder lo que la primera pasada
+ya sabía.
+
+El observador no se sigue a sí mismo, de modo que sus propias visitas quedan
+fuera sin una condición que lo diga. Es la misma propiedad en la que se apoyan
+las notificaciones.
+
+El índice de la épica 10 —`ix_visits_restaurant_occurred_id`— encabeza por
+restaurante y sigue por instante, que sirve a la lista cronológica pero no a
+esta agrupación: obliga a leer todas las visitas que el lugar recibió alguna
+vez. La migración `0108` agrega
+`ix_visits_restaurant_public_author (restaurant_id, visibility, author_id,
+occurred_at)`, que responde el bloque desde el índice: el prefijo fija
+restaurante y visibilidad, y lo que queda ya viene ordenado por persona.
+
+Sobre PostgreSQL 17, con cuatrocientas mil visitas repartidas en trescientos
+restaurantes y un observador que sigue a trescientas personas, el plan pasa de
+un *bitmap heap scan* de 1334 bloques —todas las visitas del restaurante, más
+un *sort* para agrupar— a un *index only scan* de 81 filas que alimenta
+directamente el *group aggregate*. Es la comprobación que pedía la épica, y el
+motivo por el que la migración existe en vez de reutilizar el índice anterior.
+
+### Fotografías: un solo camino de subida
+
+`app/services/photos.py` es el único lugar por donde una imagen entra al
+sistema, y el orden de siempre —validar, almacenar el objeto, abrir la
+transacción— está escrito una sola vez.
+
+La reseña ya no sube nada: se escribe sobre una fotografía que existe, y
+`create_review` sigue siendo el único punto donde se persiste una reseña, que
+es donde los grupos enganchan su emisor de Web Push. **Su firma cambió** con la
+épica 10: recibe `photo_id`, `rating`, `text` y `visibility` en vez del archivo
+y el nombre del plato, y ya no recibe el proveedor de medios. Un emisor
+enganchado ahí tiene que leer el restaurante de la reseña devuelta y no de sus
+argumentos.
+
+Quién puede reseñar y con qué visibilidad se valida dentro de la misma
+transacción que escribe la fila: la reseña la escribe quien tomó la
+fotografía, sólo sobre una de plato, y nunca más visible que ella. La segunda
+reseña sobre una misma fotografía se rechaza con la que ya existe, de modo que
+la interfaz pueda llevar hasta ella.
+
+El plato es una propiedad de la fotografía y no de la reseña. Mantenerlo en
+dos tablas garantizaría que en algún momento discrepen, y la fotografía es lo
+que se publica: la reseña es una opinión que se agrega encima. La migración
+`0104` lo traslada y retira la columna de `reviews`; la respuesta de una
+reseña lo conserva, derivado, de modo que el cambio no se note desde el
+cliente.
+
+El grupo de subida lo aporta el cliente y no lo infiere el backend. Agrupar
+por una ventana de tiempo produce resultados que el usuario no puede explicar:
+dos publicaciones deliberadamente distintas terminan juntas, o una carga lenta
+termina partida en dos. La coherencia del grupo se comprueba dentro de la
+misma transacción que escribe la fila, de modo que dos solicitudes simultáneas
+del mismo acto no puedan dejarlo inconsistente.
+
+Un origen de actividad que agrupa —hoy sólo el de fotografías— cambia tres
+cosas respecto de uno que no lo hace, y las tres viven en `ActivitySource`:
+sus claves salen de un `GROUP BY` con `MIN` sobre los dos instantes, su
+contador cuenta actos distintos y no filas, y el cursor se aplica como
+`HAVING` y no como `WHERE`. Lo último no es un detalle: un `WHERE` se
+evaluaría sobre las filas antes de que formen un acto y cortaría el acto por
+la mitad.
+
+Una fotografía que ya tiene reseña no es actividad por derecho propio. El
+origen de actividad de fotografías lo expresa con una condición extra —`NOT
+EXISTS` sobre la reseña—, que el contador del perfil aplica también, para que
+nunca prometa filas que la lista no va a producir.
+
+### La conversación de una fotografía, que no es actividad
+
+`app/services/comments.py` es el único lugar donde alguien escribe sobre el
+contenido de otro. Todo lo demás que la aplicación publica —visitas,
+fotografías, reseñas, evaluaciones— es el registro propio de una experiencia
+en un restaurante.
+
+**Un comentario no es actividad**, y por eso no tiene `ActivitySource`, no
+entra en `ACTIVITY_SOURCES`, no aparece en el feed ni en el perfil de su autor
+y no llama a `notify`. La clasificación es la del enunciado general, que
+enumera cuatro clases de actividad y define la conversación aparte, y se
+sostiene por sí sola: el feed cuenta lo que las personas registran de su
+experiencia, y un thread de veinte mensajes inundaría el feed de todos los que
+siguen a cualquiera de los que hablan. Avisar a quien publicó la fotografía
+sería una clase de aviso distinta de la que define el enunciado —«quien te
+sigue publicó algo», «alguien publicó en un restaurante que sigues»— y hay
+que decidirla aparte, no deducirla.
+
+**El thread tiene dos niveles.** `parent_id` es nulo en un comentario y
+apunta a un comentario de primer nivel en una respuesta; nunca a otra
+respuesta. Al crear, el servicio resuelve el padre real: responder a una
+respuesta se acepta y queda colgado del comentario al que esa respuesta
+pertenece. Un anidamiento sin límite obliga a una consulta recursiva, cuyo
+soporte en Aurora DSQL no se da por sentado, y a una interfaz que sobre un
+teléfono se queda sin ancho al tercer nivel.
+
+El comentario tampoco tiene visibilidad propia: vive sobre una fotografía
+pública y es público. Una tercera columna de visibilidad crearía un objeto
+capaz de contradecir aquello de lo que habla, que es el problema que el orden
+entre reseña y fotografía ya había evitado.
+
+`_replies_of_page` resuelve las respuestas y los totales de una página
+completa en **una sola consulta**: una ventana numera las respuestas de cada
+padre y las cuenta a la vez, y el select exterior conserva las primeras
+`REPLY_PREVIEW` de cada uno. Una consulta por comentario es el N+1 que el
+resto de la API evita, y aquí sería el caso peor, porque una pantalla de
+conversación los muestra todos. Una página cuesta tres consultas —autorizar
+la fotografía, los comentarios, las respuestas— sea cual sea el número de
+comentarios, y hay una prueba que lo afirma con ese número.
+
+`comment_count_column` es una subconsulta correlacionada que las dos
+sentencias de `photos.py` incluyen, de modo que el total viaje dentro de la
+consulta que ya se estaba ejecutando. Cuenta la conversación completa,
+respuestas incluidas, que es el número que una pantalla muestra al lado de la
+fotografía.
+
+La lista de primer nivel baja de lo más reciente a lo más antiguo, como el
+resto de las colecciones; las respuestas dentro de un comentario suben. No es
+una inconsistencia: una pantalla abre por lo último que se dijo, y una
+conversación se lee hacia adelante.
+
+### Evaluaciones y la excepción del resumen
+
+Los criterios son dato del código base y no una tabla, por la misma razón que
+el catálogo de países: una fila que nadie edita agrega una migración y un seed
+sin agregar una capacidad, y un criterio que aparece o desaparece invalida los
+promedios ya calculados. La calificación, en cambio, es una fila por criterio
+y no una columna por criterio: agregar uno es una entrada más en el catálogo
+en vez de una migración de esquema.
+
+**El resumen de la ficha es la única excepción a la regla del observador.**
+Todo lo demás en este backend responde según quién pregunta; el promedio de un
+restaurante, no. Agrega sólo evaluaciones públicas para todos, porque un
+promedio que cambiara con el observador no sería comparable entre
+restaurantes, y su autor vería un número que nadie más ve. La consecuencia
+está tomada en serio: el contador de evaluaciones de la ficha y la lista de
+`/restaurants/{id}/evaluations` describen ese mismo conjunto, de modo que los
+tres números coincidan en la misma pantalla.
+
+`_evaluation_summary` era desde #39 el punto único identificado para esto.
+Cuando llegaron las evaluaciones, sólo esa función cambió: ni el router ni la
+forma de la respuesta lo hicieron.
+
+[↑ Índice](#índice)
+
+## Perfil de usuario y regla de visibilidad
+
+`app/services/users.py` es donde vive la regla de visibilidad del proyecto, y
+las épicas que agreguen clases de actividad deben respetarla sin volver a
+discutirla: **el observador llega desde la sesión y el servicio devuelve sólo
+lo que esa persona puede ver**. El cliente no filtra. Un cliente que filtra ya
+recibió lo que debía ocultarse.
+
+La regla se aplica antes de paginar y antes de contar. Filtrar después de
+limitar devuelve páginas cortas que el cliente no puede distinguir del final
+de la colección; contar sin filtrar delata la existencia de lo que no se
+muestra. Por eso el contador de actividad de un perfil coincide siempre con lo
+que el mismo observador puede listar.
+
+Una persona tiene **una sola forma** en toda la API: identificador, handle,
+nombre y nacionalidad. El autor de una actividad, la cabecera de un perfil y
+un resultado de la búsqueda son la misma tarjeta, y tres formas distintas
+obligarían al cliente a normalizarlas antes de dibujarlas. `user_summary` la
+construye desde cualquier consulta que la haya seleccionado.
+
+El estado de seguimiento no forma parte de ese resumen. Lo acompaña donde la
+pantalla lo necesita —la búsqueda y el perfil— y no donde no: resolverlo para
+el autor de cada item de una página de feed sería una consulta por fila.
+
+La búsqueda de personas no necesita una columna normalizada adicional, a
+diferencia de la de restaurantes: el handle ya se almacena en su forma de
+comparación, que es justamente el beneficio de la decisión de la épica 1.
+
+El perfil se resuelve en una sola consulta. Los tres contadores y las dos
+direcciones del seguimiento son subconsultas correlacionadas sobre `users`, no
+una consulta por dato. El handle se normaliza con la función de la épica 1, de
+modo que `@Demo`, `demo` y `DEMO` resuelven al mismo perfil.
+
+La actividad resuelve primero el handle y después consulta. Son dos viajes
+deliberados: filtrar por el handle dentro del join devolvería una página vacía
+para un handle inexistente, que no es la misma respuesta que `404`.
+
+### El envelope de actividad y cómo se agrega una clase
+
+`app/services/activity.py` describe cada clase de actividad como un
+`ActivitySource`: qué columnas llevan su autor, su restaurante, su visibilidad
+y sus dos instantes, y cómo convertir un conjunto de identificadores en
+envelopes. **No guarda una consulta**: el feed y el perfil arman las suyas a
+partir de esa descripción, de modo que una clase nueva es una entrada más en
+`ACTIVITY_SOURCES` y nada más.
+
+La lectura ocurre en dos pasos a propósito. Primero se unen en SQL las claves
+de orden de todos los orígenes, se ordenan y se cortan, que es lo que hace que
+una página cueste una consulta acotada por muchas clases que existan. Recién
+entonces se leen las filas de las clases que compusieron esa página, una
+consulta por clase. Traer páginas completas de cada origen para ordenarlas en
+Python multiplicaría el trabajo de cada página por el número de clases.
+
+La deduplicación por doble seguimiento sobrevive al cambio porque la condición
+sigue siendo una unión lógica dentro de cada origen, y no dos listas
+concatenadas.
+
+El feed excluye además la actividad del propio observador. No es una
+optimización: es la misma regla que aplican las notificaciones, donde el autor
+siempre queda fuera, y responder de dos maneras a «quién se entera de esto»
+sería una incoherencia que el usuario notaría. Lo propio se lee en el perfil.
+
+El costo de una página no depende de cuántos items tenga: una consulta une las
+claves de todos los orígenes, y después se leen las clases presentes, una
+consulta por clase —la evaluación agrega dos más, agrupadas, para sus
+calificaciones y sus fotografías—. Hay una prueba que lo fija comparando el
+número de consultas con el número de items.
+
+#### El `LIMIT` va en cada rama de la unión
+
+`ActivitySource.newest` acota cada origen a `limit + 1` claves **antes** de la
+unión, con el mismo orden que usa la página. No es redundante con el `LIMIT`
+exterior: **una rama de un `UNION ALL` no queda acotada por el `LIMIT` de la
+consulta que la lee**, y PostgreSQL no lo empuja hacia adentro.
+
+Medido sobre PostgreSQL 17, con doscientas mil filas en cada uno de los cuatro
+orígenes y una página de veinte:
+
+| | filas leídas | bloques | tiempo | plan |
+| --- | --- | --- | --- | --- |
+| sin acotar las ramas | 800.000 | 6014 | 76,7 ms | `Parallel Seq Scan` en las cuatro, `top-N heapsort` sobre el total |
+| acotando cada rama | 24 | 16 | 0,5 ms | `Merge Append` sobre cuatro `Index Only Scan Backward` |
+
+Con el corte escrito en cada rama el planificador elige `Merge Append`, que
+consume las cuatro en orden y se detiene apenas junta las veintiuna filas que
+necesita. Sin él, lee el historial completo de cada clase.
+
+Tres detalles que la implementación no puede perder:
+
+- **El corte va después del cursor.** Una rama acotada sin la condición del
+  cursor devolvería siempre las mismas claves, y la paginación no avanzaría.
+- **`limit + 1` y no `limit`.** El sobrante es el que decide si hay página
+  siguiente, y esa decisión se toma sobre el resultado de la mezcla, nunca
+  sobre una rama.
+- **El corte viaja dentro de una subconsulta**, no sobre la rama misma.
+  SQLite rechaza un operando entre paréntesis de un `SELECT` compuesto, y
+  `SELECT * FROM (SELECT ... LIMIT n)` significa lo mismo para los dos
+  motores y produce el mismo plan en PostgreSQL. El origen agrupado acota
+  sobre el resultado del `GROUP BY`, por la misma razón por la que su cursor
+  es un `HAVING`.
+
+El perfil aplica lo mismo en `get_activity`: es la misma unión con otra
+condición y ordenada por el otro instante.
+
+Dos pruebas lo fijan, y hacen cosas distintas. Una cuenta los `LIMIT` de la
+sentencia que produce la página y exige uno por origen más el de la mezcla;
+falla si alguien vuelve a armar la unión sin acotar. La otra compara una
+página de doscientos contra el recorrido completo de páginas de cinco sobre
+los mismos datos, y exige que describan el mismo feed: acotar es una consulta
+más barata para el mismo resultado, no un resultado distinto.
+
+### Los dos instantes del envelope
+
+`app/services/activity.py` construye el envelope que comparten el feed y el
+perfil: `type`, `occurred_at`, `published_at` y el objeto bajo una clave
+llamada como su tipo. Una pantalla recorre actividad sin saber qué clases
+existen, y una clase nueva no reinterpreta los campos anteriores.
+
+Los dos instantes no son redundantes. Coinciden para una reseña, que se
+publica cuando se escribe, pero la visita de la épica 7 trae un momento que el
+usuario informa y que puede estar en el pasado. El perfil ordena por
+`occurred_at` porque es la cronología de esa persona; el feed ordena por
+`published_at` porque registrar hoy una visita de hace un mes no debe dejarla
+enterrada un mes atrás en el feed de quienes siguen a su autor.
+
+`review_activity_statement` incorpora la condición de visibilidad, y no la
+deja al llamador: ninguna consulta puede olvidarla. Los llamadores sólo
+restringen más —por autor, por seguimiento—. Cada épica que agregue una clase
+de actividad agrega aquí su fuente.
+
+### Cursores
+
+`app/services/cursors.py` codifica la clave de orden de la última fila que el
+cliente recibió. El valor es opaco a propósito: su contenido pertenece a la
+consulta que lo emitió, y un cliente que lo interprete queda atado a ella.
+Base64url lo hace utilizable dentro de un query string.
+
+El códec vive fuera del feed porque el perfil lo usa con otra clave de orden,
+y las colecciones de restaurantes lo usarán con una clave que no es temporal.
+
+[↑ Índice](#índice)
+
+## Notificaciones dirigidas
+
+`app/services/notifications.py` responde una sola pregunta —a quién
+corresponde avisar de una actividad— y se detiene ahí. Enviar es el emisor de
+Web Push de cada grupo, que vive en el mismo proceso, y **por eso esto es una
+función y no un endpoint**: uno que respondiera «quiénes deben enterarse de
+esto» publicaría el grafo de seguidores a cualquiera con sesión.
+
+`resolve_recipients` recibe autor, restaurante y visibilidad, que es lo que
+toda clase de actividad tiene, de modo que agregar una clase no cambia nada
+aquí. La deduplicación ocurre en la consulta, como una unión lógica de ambas
+condiciones de seguimiento y no como dos listas concatenadas después: quien
+sigue al autor y al restaurante es un destinatario, no dos. Devuelve
+identificadores de usuario y no suscripciones, porque la tabla de
+suscripciones es de cada grupo y este módulo no debe conocerla.
+
+El enganche es único. Antes de la épica 14 vivía dentro de la creación de una
+reseña, lo que era razonable mientras la reseña era la única clase de
+actividad; con cuatro habría obligado a cada grupo a repetir su llamada y a
+descubrir por su cuenta las clases nuevas. Ahora los servicios que avisan
+—visitas, fotografías y evaluaciones— invocan `notify` **después** de que su
+transacción se confirma, nunca dentro:
+avisar sobre una escritura que después revierte produce avisos de contenido
+que no existe, y el reintento de una transacción bajo Aurora DSQL puede
+ejecutar su cuerpo más de una vez. Un emisor que falla se registra y no
+propaga: no puede deshacer una actividad que ya está escrita.
+
+El aviso de un grupo de fotografías lo dispara la primera del grupo, y el
+identificador que viaja es el del grupo. Con una solicitud por archivo el
+backend no puede saber que el acto está completo, y esperar a que lo esté
+introduciría trabajo diferido que este backend no tiene.
+
+**La reseña no avisa.** Es la única clase de actividad que no lo hace, y la
+razón es la misma que ordena el feed: la fotografía de la que habla ya avisó
+cuando se publicó, y el feed muestra a ambas como una sola entrada, porque una
+fotografía reseñada deja de ser actividad propia. Un segundo aviso
+contradiría lo que el seguidor va a ver al abrirlo. La regla, entonces, no es
+«una actividad, un aviso» sino **una entrada del feed, un aviso**, que es la
+misma deduplicación que el enunciado pide.
+
+[↑ Índice](#índice)
+
 ## Configuración
 
 `app/core/config.py` define `Settings`, que hereda de `BaseSettings`. Pydantic
@@ -364,6 +910,8 @@ conserva para el modo en que Vite se ejecuta directamente y la API se abre en
 otro origen. Los mismos valores son orígenes explícitamente confiables para las
 operaciones mutables de autenticación; CORS y la validación CSRF son controles
 distintos.
+
+[↑ Índice](#índice)
 
 ## Persistencia con SQLAlchemy Core
 
@@ -415,6 +963,8 @@ reintentos, logout actualiza condicionalmente una fila aún no revocada y el
 CRUD de restaurantes fija UUID/timestamp y repite el conjunto completo de
 cambios.
 
+[↑ Índice](#índice)
+
 ## Esquema y migraciones con Alembic
 
 `app/db/schema.py` representa el esquema deseado actualmente. Los archivos de
@@ -459,6 +1009,8 @@ El contenedor local ejecuta `alembic upgrade head` antes de Uvicorn. Lambda no
 lo hace: en AWS las migraciones son un job separado del despliegue y la función
 no recibe permisos DDL.
 
+[↑ Índice](#índice)
+
 ## Cómo agregar un endpoint
 
 1. Crea o amplía un módulo en `app/api/` y declara su `APIRouter`.
@@ -474,24 +1026,66 @@ no recibe permisos DDL.
 Usa rutas relativas `/api/v1/...` desde el frontend. No incorpores hosts,
 puertos ni nombres de ambiente en los módulos de la API.
 
+[↑ Índice](#índice)
+
 ## Estrategia de pruebas
 
 La suite combina niveles distintos:
 
-- `test_health.py`, `test_auth.py` y `test_restaurants.py`: contrato HTTP rápido
-  con `TestClient` y colaboradores reemplazados cuando corresponde;
+**Infraestructura y contratos transversales**
+
+- `test_health.py`, `test_auth.py`: ciclo de sesión y contrato HTTP rápido con
+  `TestClient`;
 - `test_security.py` y `test_retry.py`: claims obligatorios, expiración y
   política de reintentos;
 - `test_config.py`: invariantes de configuración;
 - `test_database.py`: construcción de engines PostgreSQL/DSQL;
-- `test_seed.py`: idempotencia del seed;
 - `test_media_storage.py`: contrato local/S3 sin una cuenta AWS;
-- `test_reviews.py` y `test_reviews_service.py`: multipart, autorización,
-  imágenes, fallas parciales y compensación;
+- `test_countries.py`: catálogo de nacionalidades;
+- `test_seed.py`: idempotencia del seed y resolución de colisiones de fixtures.
+
+**Una clase de actividad o una épica por archivo**
+
+- `test_restaurants.py`, `test_restaurant_search.py`, `test_restaurant_map.py`,
+  `test_restaurant_nearby.py`, `test_restaurant_detail.py`: colección, búsqueda,
+  mapa, cercanía, ficha, galería y personas conocidas;
+- `test_photos.py`: único camino de subida, grupos, validación de imágenes,
+  fallas parciales y compensación;
+- `test_reviews.py`, `test_visits.py`, `test_evaluations.py`,
+  `test_comments.py`: cada clase con su visibilidad, sus errores y su
+  paginación;
+- `test_users.py`: perfil, actividad, búsqueda y seguimiento;
+- `test_feed.py`: unión de orígenes, orden por publicación, exclusión de lo
+  propio y costo de una página;
+- `test_notifications.py`: resolución de destinatarios y la regla «una entrada
+  del feed, un aviso».
+
+**Contra el motor real**
+
 - `test_integration.py`: ciclo completo de migraciones, seed, autenticación y
-  persistencia de restaurantes/reseñas contra PostgreSQL real; y
+  persistencia contra PostgreSQL. Aquí viven las comprobaciones que SQLite
+  podría responder distinto: funciones de ventana, agrupaciones y la forma de
+  la unión acotada;
 - `test_lambda.py`: eventos API Gateway HTTP API v2, cookies y un upload
   multipart binario procesados por Mangum.
+
+Las pruebas de servicio corren sobre SQLite en memoria con el mismo `metadata`
+y el mismo seed, lo que las hace rápidas; las de integración comprueban que el
+motor real esté de acuerdo.
+
+**Documentación**
+
+- `test_documentation.py`: que el contrato documentado y el que expone `/docs`
+  sean el mismo. Comprueba que toda operación esté en
+  [`docs/api.md`](docs/api.md), que ninguna documentada haya desaparecido, que
+  cada una lleve un resumen escrito por alguien y no el que FastAPI deriva del
+  nombre de la función, y que el mapa de épicas del README llegue a las
+  diecisiete secciones.
+
+Existe porque los dos se desfasaron: el README creció una épica a la vez y
+terminó afirmando cosas que habían dejado de ser ciertas, y siete operaciones
+llegaron a OpenAPI con el resumen autogenerado. Nada de eso rompió una prueba,
+porque ninguna miraba.
 
 Para desarrollo rápido:
 
@@ -516,6 +1110,8 @@ Una prueba unitaria no reemplaza la prueba de migración. Todo cambio de tablas,
 restricciones o comportamiento dependiente de PostgreSQL requiere cobertura de
 integración.
 
+[↑ Índice](#índice)
+
 ## Portabilidad hacia Lambda y Aurora DSQL
 
 Estas reglas mantienen abierta la migración futura:
@@ -535,6 +1131,8 @@ Estas reglas mantienen abierta la migración futura:
 La guía [AWS Lambda y Aurora DSQL](docs/aws-lambda.md) detalla IAM, packaging,
 observabilidad y las diferencias de compatibilidad que deben verificarse.
 
+[↑ Índice](#índice)
+
 ## Convenciones que deben preservarse
 
 - No guardar secretos, tokens, passwords ni claves privadas en Git.
@@ -548,6 +1146,8 @@ observabilidad y las diferencias de compatibilidad que deben verificarse.
   entorno después de cualquier invocación.
 - No dividir el monolito en servicios solo por organización de carpetas; los
   módulos son límites de código dentro de una aplicación.
+
+[↑ Índice](#índice)
 
 ## Referencias oficiales
 
@@ -569,3 +1169,5 @@ observabilidad y las diferencias de compatibilidad que deben verificarse.
 - [Boto3: `upload_fileobj`](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/s3/client/upload_fileobj.html)
 - [Amazon S3: URLs prefirmadas](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html)
 - [Pytest](https://docs.pytest.org/)
+
+[↑ Índice](#índice)

@@ -1,0 +1,47 @@
+html,
+body,
+#app-root {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+}
+
+.page-content {
+  width: min(100% - 32px, 960px);
+  margin: 0 auto;
+  padding: 28px 0 104px;
+}
+
+.page-heading {
+  margin: 8px 0 20px;
+}
+
+.activity-photo {
+  display: block;
+  width: min(100%, 480px);
+  max-height: 360px;
+  object-fit: cover;
+  border-radius: 12px;
+  margin-top: 16px;
+}
+
+.field-stack {
+  display: grid;
+  gap: 16px;
+}
+
+@media (max-width: 600px) {
+  .page-content {
+    width: min(100% - 24px, 960px);
+    padding-top: 20px;
+    padding-bottom: 104px;
+  }
+}

@@ -6,6 +6,7 @@ from sqlalchemy import (
     Index,
     MetaData,
     Numeric,
+    SmallInteger,
     String,
     Table,
     Uuid,
@@ -61,6 +62,24 @@ restaurant_follows = Table(
     Column("restaurant_id", Uuid(as_uuid=True), primary_key=True),
 )
 Index("ix_restaurant_follows_restaurant_id", restaurant_follows.c.restaurant_id)
+push_subscriptions = Table(
+    "push_subscriptions",
+    metadata,
+    Column("id", Uuid(as_uuid=True), primary_key=True),
+    # Aurora DSQL's SQLAlchemy adapter omits foreign keys (see auth_sessions
+    # above); the application verifies user_id itself when subscribing.
+    Column("user_id", Uuid(as_uuid=True), nullable=False),
+    Column("endpoint", String(500), nullable=False, unique=True),
+    Column("p256dh", String(255), nullable=False),
+    Column("auth", String(255), nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+Index("ix_push_subscriptions_user_id", push_subscriptions.c.user_id)
 
 cuisine_styles = Table(
     "cuisine_styles",
@@ -78,6 +97,10 @@ restaurants = Table(
     Column("id", Uuid(as_uuid=True), primary_key=True),
     Column("name", String(120), nullable=False),
     Column("normalized_name", String(240), nullable=False),
+    # Search form: same text without diacritics. It is a separate column and
+    # not a replacement, because duplicate detection must keep telling
+    # "Café Perú" and "Cafe Peru" apart while search finds them together.
+    Column("search_name", String(240), nullable=False),
     Column("address", String(255), nullable=False),
     Column("normalized_address", String(510), nullable=False),
     Column("identity_key", String(64), nullable=False),
@@ -107,6 +130,19 @@ Index(
     restaurants.c.normalized_name,
     restaurants.c.id,
 )
+Index(
+    "ix_restaurants_search_name_id",
+    restaurants.c.search_name,
+    restaurants.c.id,
+)
+# The map asks "what is inside this rectangle". Plain comparisons over these
+# two columns keep the question answerable without PostGIS, which Aurora DSQL
+# does not offer.
+Index(
+    "ix_restaurants_location",
+    restaurants.c.latitude,
+    restaurants.c.longitude,
+)
 
 restaurant_cuisine_styles = Table(
     "restaurant_cuisine_styles",
@@ -133,12 +169,121 @@ photos = Table(
     Column("storage_key", String(512), nullable=False),
     Column("content_type", String(64), nullable=False),
     Column("size_bytes", BigInteger(), nullable=False),
+    # A photograph is published activity in its own right, so its visibility
+    # is its own and not deduced from a review it may not have.
+    Column("visibility", String(16), nullable=False),
+    # dish, menu or venue. Only dish is accepted until épica 9.
+    Column("kind", String(16), nullable=False),
+    # Which dish this is, for a photograph of one. Null for a menu or a venue.
+    Column("dish_name", String(120), nullable=True),
+    # Its search form, so photographs of the same dish group together whether
+    # or not whoever typed them used the accents.
+    Column("search_dish_name", String(240), nullable=True),
+    # Optional text the interface can use as the alternative text of the image.
+    Column("caption", String(500), nullable=True),
+    # Identifies the act of publishing when it carried more than one
+    # photograph. Null for one published on its own. The client generates it.
+    Column("upload_group", Uuid(as_uuid=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
 Index("uq_photos_storage_key", photos.c.storage_key, unique=True)
 Index("ix_photos_author_id", photos.c.author_id)
-Index("ix_photos_restaurant_id", photos.c.restaurant_id)
+Index(
+    "ix_photos_restaurant_created_id",
+    photos.c.restaurant_id,
+    photos.c.created_at,
+    photos.c.id,
+)
+Index(
+    "ix_photos_restaurant_dish",
+    photos.c.restaurant_id,
+    photos.c.search_dish_name,
+)
+Index("ix_photos_upload_group", photos.c.upload_group)
+
+evaluations = Table(
+    "evaluations",
+    metadata,
+    Column("id", Uuid(as_uuid=True), primary_key=True),
+    # Aurora DSQL does not support foreign keys. The service checks the
+    # restaurant and the photographs in the transaction that writes the rows.
+    Column("author_id", Uuid(as_uuid=True), nullable=False),
+    Column("restaurant_id", Uuid(as_uuid=True), nullable=False),
+    Column("comment", String(2000), nullable=False),
+    Column("visibility", String(16), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+# One evaluation per person and restaurant. Without it, one person could move
+# the average of a restaurant as many times as they liked.
+Index(
+    "uq_evaluations_author_restaurant",
+    evaluations.c.author_id,
+    evaluations.c.restaurant_id,
+    unique=True,
+)
+Index(
+    "ix_evaluations_restaurant_visibility_created",
+    evaluations.c.restaurant_id,
+    evaluations.c.visibility,
+    evaluations.c.created_at,
+)
+Index("ix_evaluations_author_created_id", evaluations.c.author_id, evaluations.c.created_at)
+
+evaluation_ratings = Table(
+    "evaluation_ratings",
+    metadata,
+    Column("evaluation_id", Uuid(as_uuid=True), primary_key=True),
+    # A row per criterion rather than a column per criterion: adding one is an
+    # entry in the catalogue instead of a schema migration.
+    Column("criterion", String(64), primary_key=True),
+    Column("rating", SmallInteger(), nullable=False),
+    CheckConstraint("rating BETWEEN 1 AND 5", name="ck_evaluation_ratings_range"),
+)
+
+evaluation_photos = Table(
+    "evaluation_photos",
+    metadata,
+    Column("evaluation_id", Uuid(as_uuid=True), primary_key=True),
+    Column("photo_id", Uuid(as_uuid=True), primary_key=True),
+)
+
+Index("ix_evaluation_photos_photo_id", evaluation_photos.c.photo_id)
+
+visits = Table(
+    "visits",
+    metadata,
+    Column("id", Uuid(as_uuid=True), primary_key=True),
+    # Aurora DSQL does not support foreign keys. The service checks that the
+    # restaurant exists in the same transaction that persists the visit.
+    Column("author_id", Uuid(as_uuid=True), nullable=False),
+    Column("restaurant_id", Uuid(as_uuid=True), nullable=False),
+    # When the person was there, which they report and may be in the past.
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    Column("visibility", String(16), nullable=False),
+    # When it was published, which is what reaches their followers.
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+Index("ix_visits_author_occurred_id", visits.c.author_id, visits.c.occurred_at, visits.c.id)
+Index(
+    "ix_visits_restaurant_occurred_id",
+    visits.c.restaurant_id,
+    visits.c.occurred_at,
+    visits.c.id,
+)
+Index("ix_visits_visibility_created_id", visits.c.visibility, visits.c.created_at, visits.c.id)
+# The restaurant page groups the public visits of the people the viewer
+# follows. Reading them from this index alone keeps that block from scanning
+# the whole history of a busy restaurant.
+Index(
+    "ix_visits_restaurant_public_author",
+    visits.c.restaurant_id,
+    visits.c.visibility,
+    visits.c.author_id,
+    visits.c.occurred_at,
+)
 
 reviews = Table(
     "reviews",
@@ -147,11 +292,17 @@ reviews = Table(
     Column("author_id", Uuid(as_uuid=True), nullable=False),
     Column("restaurant_id", Uuid(as_uuid=True), nullable=False),
     Column("photo_id", Uuid(as_uuid=True), nullable=False),
-    Column("dish_name", String(120), nullable=False),
+    # The dish lives on the photograph. Keeping it in two tables would
+    # guarantee that at some point they disagree.
+    # One to five, the same scale the evaluation criteria of épica 11 use, so
+    # the interface presents one kind of control and both numbers read
+    # together without translation.
+    Column("rating", SmallInteger(), nullable=False),
     Column("text", String(2000), nullable=False),
     Column("visibility", String(16), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("rating BETWEEN 1 AND 5", name="ck_reviews_rating_range"),
 )
 
 Index("uq_reviews_photo_id", reviews.c.photo_id, unique=True)
@@ -168,3 +319,26 @@ Index(
     reviews.c.created_at,
     reviews.c.id,
 )
+
+comments = Table(
+    "comments",
+    metadata,
+    Column("id", Uuid(as_uuid=True), primary_key=True),
+    # Aurora DSQL does not support foreign keys. The service checks that the
+    # photograph and the parent comment exist in the same transaction that
+    # persists the comment.
+    Column("photo_id", Uuid(as_uuid=True), nullable=False),
+    Column("author_id", Uuid(as_uuid=True), nullable=False),
+    # Null for a comment of the conversation, set for a reply. A reply to a
+    # reply carries the first-level comment here, never the reply: the thread
+    # has two levels and no more.
+    Column("parent_id", Uuid(as_uuid=True), nullable=True),
+    Column("text", String(1000), nullable=False),
+    # A comment has no visibility of its own: it lives on a public photograph
+    # and is therefore public. A column that could contradict what it talks
+    # about is the problem the order between review and photograph avoided.
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+Index("ix_comments_photo_created_id", comments.c.photo_id, comments.c.created_at, comments.c.id)
+Index("ix_comments_parent_created_id", comments.c.parent_id, comments.c.created_at, comments.c.id)

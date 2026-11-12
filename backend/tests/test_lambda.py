@@ -12,8 +12,8 @@ from app.api.dependencies import get_current_session
 from app.main import app, handler
 from app.media.storage import get_media_storage
 from app.services import feed as feed_service
+from app.services import photos as photo_service
 from app.services import restaurants as restaurant_service
-from app.services import reviews as review_service
 from app.services.auth import AuthenticatedSession, IssuedSession
 
 
@@ -82,7 +82,7 @@ def test_lambda_handler_preserves_login_and_logout_cookies(monkeypatch):
         id=uuid4(),
         user_id=uuid4(),
         email="demo@example.com",
-        handle="@demo",
+        handle="demo",
         name="Demo Foodie",
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
@@ -140,9 +140,9 @@ def test_lambda_handler_serves_protected_restaurant_collection(monkeypatch):
     )
     received = {}
 
-    def list_restaurants(*, limit, offset):
-        received.update(limit=limit, offset=offset)
-        return [restaurant]
+    def list_restaurants(*, query, limit, cursor):
+        received.update(query=query, limit=limit, cursor=cursor)
+        return restaurant_service.RestaurantPage(items=(restaurant,), next_cursor=None)
 
     monkeypatch.setattr(restaurant_service, "list_restaurants", list_restaurants)
     app.dependency_overrides[get_current_session] = lambda: None
@@ -151,7 +151,7 @@ def test_lambda_handler_serves_protected_restaurant_collection(monkeypatch):
             api_gateway_event(
                 "GET",
                 "/api/v1/restaurants",
-                query_string="limit=5&offset=2",
+                query_string="q=lambda&limit=5",
             ),
             LambdaContext(),
         )
@@ -159,40 +159,34 @@ def test_lambda_handler_serves_protected_restaurant_collection(monkeypatch):
         app.dependency_overrides.clear()
 
     assert response["statusCode"] == 200
-    assert json.loads(response["body"])[0]["id"] == str(restaurant.id)
-    assert received == {"limit": 5, "offset": 2}
+    assert json.loads(response["body"])["items"][0]["id"] == str(restaurant.id)
+    assert received == {"query": "lambda", "limit": 5, "cursor": None}
 
 
-def test_lambda_handler_parses_multipart_review_upload(monkeypatch):
+def test_lambda_handler_parses_multipart_photo_upload(monkeypatch):
+    """Multipart now enters through the photo endpoint, which is what uploads."""
     session = AuthenticatedSession(
         id=uuid4(),
         user_id=uuid4(),
         email="demo@example.com",
-        handle="@demo",
+        handle="demo",
         name="Demo Foodie",
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     timestamp = datetime(2026, 8, 25, tzinfo=UTC)
     restaurant_id = uuid4()
-    photo = review_service.Photo(
+    photo = photo_service.Photo(
         id=uuid4(),
         author_id=session.user_id,
         restaurant_id=restaurant_id,
         storage_key="photos/lambda.png",
         content_type="image/png",
         size_bytes=42,
-        created_at=timestamp,
-    )
-    review = review_service.Review(
-        id=uuid4(),
-        author_id=session.user_id,
-        restaurant_id=restaurant_id,
-        dish_name="Ceviche",
-        text="Muy fresco",
         visibility="public",
-        photo=photo,
+        kind="dish",
+        dish_name="Ceviche",
+        caption=None,
         created_at=timestamp,
-        updated_at=timestamp,
     )
     image = BytesIO()
     Image.new("RGB", (2, 2), color="tomato").save(image, format="PNG")
@@ -204,11 +198,14 @@ def test_lambda_handler_parses_multipart_review_upload(monkeypatch):
             'Content-Disposition: form-data; name="restaurant_id"\r\n\r\n'
             f"{restaurant_id}\r\n"
             f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="kind"\r\n\r\n'
+            "dish\r\n"
+            f"--{boundary}\r\n"
             'Content-Disposition: form-data; name="dish_name"\r\n\r\n'
             "Ceviche\r\n"
             f"--{boundary}\r\n"
-            'Content-Disposition: form-data; name="text"\r\n\r\n'
-            "Muy fresco\r\n"
+            'Content-Disposition: form-data; name="visibility"\r\n\r\n'
+            "public\r\n"
             f"--{boundary}\r\n"
             'Content-Disposition: form-data; name="photo"; filename="dish.png"\r\n'
             "Content-Type: image/png\r\n\r\n"
@@ -218,12 +215,30 @@ def test_lambda_handler_parses_multipart_review_upload(monkeypatch):
     )
     received = {}
 
-    def create_review(**kwargs):
+    def store_photo(**kwargs):
         received.update(kwargs)
         assert kwargs["photo_stream"].read() == image_bytes
-        return review
+        return photo
 
-    monkeypatch.setattr(review_service, "create_review", create_review)
+    monkeypatch.setattr(photo_service, "store_photo", store_photo)
+    monkeypatch.setattr(
+        photo_service,
+        "get_photo",
+        lambda photo_id, **kwargs: photo_service.GalleryPhoto(
+            id=photo.id,
+            author=photo_service.PhotoAuthor(
+                id=session.user_id, handle=session.handle, name=session.name
+            ),
+            kind="dish",
+            visibility="public",
+            dish_name="Ceviche",
+            caption=None,
+            created_at=timestamp,
+            content_url=photo.content_url,
+            review_id=None,
+            comments_count=0,
+        ),
+    )
     app.dependency_overrides[get_current_session] = lambda: session
     app.dependency_overrides[get_media_storage] = lambda: object()
     origin = "https://example.execute-api.us-east-1.amazonaws.com"
@@ -231,7 +246,7 @@ def test_lambda_handler_parses_multipart_review_upload(monkeypatch):
         response = handler(
             api_gateway_event(
                 "POST",
-                "/api/v1/reviews",
+                "/api/v1/photos",
                 body=base64.b64encode(multipart).decode(),
                 headers={
                     "content-type": f"multipart/form-data; boundary={boundary}",
@@ -246,7 +261,7 @@ def test_lambda_handler_parses_multipart_review_upload(monkeypatch):
         app.dependency_overrides.clear()
 
     assert response["statusCode"] == 201
-    assert json.loads(response["body"])["id"] == str(review.id)
+    assert json.loads(response["body"])["id"] == str(photo.id)
     assert received["author_id"] == session.user_id
     assert received["declared_content_type"] == "image/png"
 
@@ -256,7 +271,7 @@ def test_lambda_handler_serves_feed_and_review_detail(monkeypatch):
         id=uuid4(),
         user_id=uuid4(),
         email="demo@example.com",
-        handle="@demo",
+        handle="demo",
         name="Demo Foodie",
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
@@ -265,14 +280,21 @@ def test_lambda_handler_serves_feed_and_review_detail(monkeypatch):
     review = {
         "id": review_id,
         "dish_name": "Ceviche",
+        "rating": 4,
         "text": "Muy fresco",
         "visibility": "public",
-        "author": {"id": session.user_id, "handle": session.handle, "name": session.name},
+        "author": {
+            "id": session.user_id,
+            "handle": session.handle,
+            "name": session.name,
+            "nationality": {"code": "CL", "name": "Chile"},
+        },
         "restaurant": {"id": uuid4(), "name": "Puerto Lima", "address": "Santiago"},
         "photo": {
             "id": uuid4(),
             "content_type": "image/webp",
             "content_url": f"/api/v1/photos/{uuid4()}/content",
+            "caption": None,
         },
         "created_at": timestamp,
         "updated_at": timestamp,
@@ -281,7 +303,14 @@ def test_lambda_handler_serves_feed_and_review_detail(monkeypatch):
         feed_service,
         "get_feed",
         lambda viewer_id, **kwargs: {
-            "items": [{"type": "review", "occurred_at": timestamp, "review": review}],
+            "items": [
+                {
+                    "type": "review",
+                    "occurred_at": timestamp,
+                    "published_at": timestamp,
+                    "review": review,
+                }
+            ],
             "next_cursor": None,
         },
     )

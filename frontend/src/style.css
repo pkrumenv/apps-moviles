@@ -26,7 +26,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -104,6 +105,10 @@ code {
   border-radius: 1rem;
   background: rgb(255 255 255 / 78%);
   box-shadow: 0 1rem 3rem rgb(30 52 37 / 8%);
+}
+
+.card > * {
+  min-width: 0;
 }
 
 .card h2 {
@@ -228,7 +233,8 @@ label {
   font-weight: 700;
 }
 
-input {
+input,
+textarea {
   width: 100%;
   min-height: 2.75rem;
   padding: 0.65rem 0.75rem;
@@ -236,6 +242,16 @@ input {
   border-radius: 0.55rem;
   color: inherit;
   background: white;
+}
+
+textarea {
+  min-height: 6rem;
+  resize: vertical;
+}
+
+input[type="file"] {
+  min-height: auto;
+  padding: 0.5rem 0.6rem;
 }
 
 .status {
@@ -252,6 +268,109 @@ input {
 .status[data-kind="error"] {
   color: #7c271d;
   background: #f6dfda;
+}
+
+.review-form {
+  min-width: 0;
+}
+
+.feed-list {
+  display: grid;
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.feed-item {
+  min-width: 0;
+}
+
+.feed-card-content {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid #d7ddd2;
+  border-radius: 0.8rem;
+  background: #f8faf6;
+  overflow-wrap: anywhere;
+}
+
+.feed-card-content header {
+  color: #465249;
+  font-size: 0.9rem;
+}
+
+.feed-card-content h3 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.15rem;
+  font-weight: 500;
+}
+
+.feed-card-content p {
+  line-height: 1.5;
+}
+
+.feed-card-image {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  max-height: 24rem;
+  border-radius: 0.6rem;
+  object-fit: cover;
+}
+
+.feed-card-link {
+  justify-self: start;
+  color: #285b3b;
+  font-weight: 700;
+}
+
+.offline-badge {
+  padding: 0.7rem 1rem;
+  border-radius: 0.6rem;
+  color: #7c271d;
+  background: #f6dfda;
+  font-size: 0.9rem;
+}
+
+.review-detail-card {
+  display: grid;
+  gap: 0.6rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.review-detail-card h2 {
+  margin: 0.25rem 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.5rem;
+  font-weight: 500;
+}
+
+.review-detail-card > button {
+  justify-self: start;
+  background: transparent;
+  color: #285b3b;
+  padding: 0.4rem 0;
+}
+
+.review-detail-card > button:hover {
+  background: transparent;
+  text-decoration: underline;
+}
+
+.review-detail-photo {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  max-height: 28rem;
+  border-radius: 0.6rem;
+  object-fit: cover;
 }
 
 footer {

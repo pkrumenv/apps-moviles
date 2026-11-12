@@ -7,15 +7,23 @@ from sqlalchemy.engine import Connection
 from app.core.config import settings
 from app.core.security import hash_password
 from app.db.fixtures import (
+    COMMENT_FIXTURES,
     CUISINE_STYLES,
     DEMO_USERS,
+    EVALUATION_FIXTURES,
+    PHOTO_FIXTURES,
     RESTAURANT_FOLLOWS,
     RESTAURANTS,
     REVIEW_FIXTURES,
     USER_FOLLOWS,
+    VISIT_FIXTURES,
 )
 from app.db.schema import (
+    comments,
     cuisine_styles,
+    evaluation_photos,
+    evaluation_ratings,
+    evaluations,
     photos,
     restaurant_cuisine_styles,
     restaurant_follows,
@@ -23,10 +31,16 @@ from app.db.schema import (
     reviews,
     user_follows,
     users,
+    visits,
 )
 from app.db.session import engine
 from app.media.storage import MediaStorage, get_media_storage
-from app.services.restaurants import normalize_restaurant_text, restaurant_identity_key
+from app.services.photos import DISH
+from app.services.restaurants import (
+    normalize_restaurant_search_text,
+    normalize_restaurant_text,
+    restaurant_identity_key,
+)
 
 
 class FixtureIdentityConflictError(RuntimeError):
@@ -117,6 +131,7 @@ def _seed_restaurants(
     changed = False
     for fixture in RESTAURANTS:
         normalized_name = normalize_restaurant_text(fixture.name)
+        search_name = normalize_restaurant_search_text(fixture.name)
         normalized_address = normalize_restaurant_text(fixture.address)
         identity_key = restaurant_identity_key(fixture.name, fixture.address)
         id_match = by_id.get(fixture.id)
@@ -135,6 +150,7 @@ def _seed_restaurants(
                 id=fixture.id,
                 name=fixture.name,
                 normalized_name=normalized_name,
+                search_name=search_name,
                 address=fixture.address,
                 normalized_address=normalized_address,
                 identity_key=identity_key,
@@ -198,6 +214,86 @@ def _seed_feed_fixtures(
                 )
             )
             changed = True
+    existing_photo_only_ids = set(connection.scalars(select(photos.c.id)))
+    for fixture in PHOTO_FIXTURES:
+        if fixture.id in existing_photo_only_ids:
+            continue
+        asset_path = FIXTURE_ASSET_DIRECTORY / fixture.asset_name
+        with asset_path.open("rb") as stream:
+            storage_key = storage.store(
+                media_id=fixture.id,
+                stream=stream,
+                content_type=fixture.content_type,
+                extension=asset_path.suffix.removeprefix("."),
+            )
+        stored_keys.append(storage_key)
+        connection.execute(
+            insert(photos).values(
+                id=fixture.id,
+                author_id=user_ids[fixture.author_id],
+                restaurant_id=restaurant_ids[fixture.restaurant_id],
+                storage_key=storage_key,
+                content_type=fixture.content_type,
+                size_bytes=asset_path.stat().st_size,
+                visibility=fixture.visibility,
+                kind=fixture.kind,
+                dish_name=fixture.dish_name,
+                search_dish_name=(
+                    normalize_restaurant_search_text(fixture.dish_name)
+                    if fixture.dish_name
+                    else None
+                ),
+                caption=fixture.caption,
+                upload_group=fixture.upload_group,
+                created_at=fixture.created_at,
+            )
+        )
+        changed = True
+    existing_evaluation_ids = set(connection.scalars(select(evaluations.c.id)))
+    for fixture in EVALUATION_FIXTURES:
+        if fixture.id in existing_evaluation_ids:
+            continue
+        connection.execute(
+            insert(evaluations).values(
+                id=fixture.id,
+                author_id=user_ids[fixture.author_id],
+                restaurant_id=restaurant_ids[fixture.restaurant_id],
+                comment=fixture.comment,
+                visibility=fixture.visibility,
+                created_at=fixture.created_at,
+            )
+        )
+        connection.execute(
+            insert(evaluation_ratings),
+            [
+                {"evaluation_id": fixture.id, "criterion": criterion, "rating": rating}
+                for criterion, rating in fixture.ratings
+            ],
+        )
+        if fixture.photo_ids:
+            connection.execute(
+                insert(evaluation_photos),
+                [
+                    {"evaluation_id": fixture.id, "photo_id": photo_id}
+                    for photo_id in fixture.photo_ids
+                ],
+            )
+        changed = True
+    existing_visit_ids = set(connection.scalars(select(visits.c.id)))
+    for fixture in VISIT_FIXTURES:
+        if fixture.id in existing_visit_ids:
+            continue
+        connection.execute(
+            insert(visits).values(
+                id=fixture.id,
+                author_id=user_ids[fixture.author_id],
+                restaurant_id=restaurant_ids[fixture.restaurant_id],
+                occurred_at=fixture.occurred_at,
+                visibility=fixture.visibility,
+                created_at=fixture.published_at,
+            )
+        )
+        changed = True
     existing_review_ids = set(connection.scalars(select(reviews.c.id)))
     existing_photo_ids = set(connection.scalars(select(photos.c.id)))
     for fixture in REVIEW_FIXTURES:
@@ -222,6 +318,13 @@ def _seed_feed_fixtures(
                 storage_key=storage_key,
                 content_type=fixture.content_type,
                 size_bytes=asset_path.stat().st_size,
+                # A photograph published together with its review carries the
+                # visibility the review was published under.
+                visibility=fixture.visibility,
+                kind=DISH,
+                # The dish lives on the photograph, not on the review.
+                dish_name=fixture.dish_name,
+                search_dish_name=normalize_restaurant_search_text(fixture.dish_name),
                 created_at=fixture.created_at,
             )
         )
@@ -231,11 +334,26 @@ def _seed_feed_fixtures(
                 photo_id=fixture.photo_id,
                 author_id=author_id,
                 restaurant_id=restaurant_id,
-                dish_name=fixture.dish_name,
+                rating=fixture.rating,
                 text=fixture.text,
                 visibility=fixture.visibility,
                 created_at=fixture.created_at,
                 updated_at=fixture.created_at,
+            )
+        )
+        changed = True
+    existing_comment_ids = set(connection.scalars(select(comments.c.id)))
+    for fixture in COMMENT_FIXTURES:
+        if fixture.id in existing_comment_ids:
+            continue
+        connection.execute(
+            insert(comments).values(
+                id=fixture.id,
+                photo_id=fixture.photo_id,
+                author_id=user_ids[fixture.author_id],
+                parent_id=fixture.parent_id,
+                text=fixture.text,
+                created_at=fixture.created_at,
             )
         )
         changed = True

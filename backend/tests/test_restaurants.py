@@ -7,8 +7,10 @@ from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_current_session
 from app.main import app
+from app.services import photos as photo_service
 from app.services import restaurants as restaurant_service
 from app.services.auth import AuthenticatedSession
+from app.services.cursors import InvalidCursorError
 
 
 def sample_session() -> AuthenticatedSession:
@@ -16,7 +18,7 @@ def sample_session() -> AuthenticatedSession:
         id=uuid4(),
         user_id=uuid4(),
         email="demo@example.com",
-        handle="@demo",
+        handle="demo",
         name="Demo Foodie",
         expires_at=datetime(2030, 1, 1, tzinfo=UTC),
     )
@@ -74,24 +76,283 @@ def test_all_routes_require_a_session_before_calling_service(monkeypatch, method
     assert response.status_code == 401
 
 
-def test_index_uses_bounded_pagination_and_serializes_styles(monkeypatch, authenticated):
+def test_index_pages_by_cursor_and_serializes_the_shared_summary(monkeypatch, authenticated):
     restaurant = sample_restaurant()
     received = {}
 
-    def list_restaurants(*, limit, offset):
-        received.update(limit=limit, offset=offset)
-        return [restaurant]
+    def list_restaurants(*, query, limit, cursor):
+        received.update(query=query, limit=limit, cursor=cursor)
+        return restaurant_service.RestaurantPage(items=(restaurant,), next_cursor="siguiente")
 
     monkeypatch.setattr(restaurant_service, "list_restaurants", list_restaurants)
 
-    response = TestClient(app).get("/api/v1/restaurants?limit=5&offset=2")
+    response = TestClient(app).get("/api/v1/restaurants?q=cocina&limit=5&cursor=previo")
 
     assert response.status_code == 200
-    assert received == {"limit": 5, "offset": 2}
-    assert response.json()[0]["id"] == str(restaurant.id)
-    assert response.json()[0]["latitude"] == -33.4372
-    assert response.json()[0]["cuisine_styles"][0]["slug"] == "chilena"
+    assert received == {"query": "cocina", "limit": 5, "cursor": "previo"}
+    payload = response.json()
+    assert payload["next_cursor"] == "siguiente"
+    assert payload["items"][0]["id"] == str(restaurant.id)
+    assert payload["items"][0]["address"] == restaurant.address
+    assert payload["items"][0]["latitude"] == -33.4372
+    assert payload["items"][0]["cuisine_styles"][0]["slug"] == "chilena"
     assert TestClient(app).get("/api/v1/restaurants?limit=101").status_code == 422
+
+
+def test_index_rejects_a_short_term_and_a_foreign_cursor(monkeypatch, authenticated):
+    monkeypatch.setattr(
+        restaurant_service,
+        "list_restaurants",
+        lambda **kwargs: (_ for _ in ()).throw(restaurant_service.SearchTermTooShortError()),
+    )
+    short = TestClient(app).get("/api/v1/restaurants?q=c")
+    assert short.status_code == 422
+    assert short.json()["detail"][0]["loc"] == ["query", "q"]
+
+    monkeypatch.setattr(
+        restaurant_service,
+        "list_restaurants",
+        lambda **kwargs: (_ for _ in ()).throw(InvalidCursorError()),
+    )
+    assert TestClient(app).get("/api/v1/restaurants?cursor=roto").status_code == 422
+
+
+def test_cuisine_style_catalogue_requires_a_session(monkeypatch):
+    monkeypatch.setattr(
+        restaurant_service,
+        "list_cuisine_styles",
+        lambda: [restaurant_service.CuisineStyle(id=uuid4(), slug="chilena", name="Chilena")],
+    )
+    assert TestClient(app).get("/api/v1/cuisine-styles").status_code == 401
+
+    app.dependency_overrides[get_current_session] = sample_session
+    try:
+        response = TestClient(app).get("/api/v1/cuisine-styles")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()[0]["slug"] == "chilena"
+
+
+def test_map_answers_a_rectangle_and_announces_truncation(monkeypatch, authenticated):
+    restaurant = sample_restaurant()
+    received = {}
+
+    def restaurants_in_bounds(*, south, west, north, east, limit):
+        received.update(south=south, west=west, north=north, east=east, limit=limit)
+        return restaurant_service.RestaurantMapResult(items=(restaurant,), truncated=True)
+
+    monkeypatch.setattr(restaurant_service, "restaurants_in_bounds", restaurants_in_bounds)
+
+    response = TestClient(app).get(
+        "/api/v1/restaurants/map?south=-33.5&west=-70.7&north=-33.4&east=-70.5&limit=50"
+    )
+
+    assert response.status_code == 200
+    assert received == {
+        "south": -33.5,
+        "west": -70.7,
+        "north": -33.4,
+        "east": -70.5,
+        "limit": 50,
+    }
+    payload = response.json()
+    assert payload["truncated"] is True
+    assert payload["items"][0]["id"] == str(restaurant.id)
+    assert payload["items"][0]["latitude"] == -33.4372
+    assert payload["items"][0]["cuisine_styles"][0]["slug"] == "chilena"
+
+
+def test_map_route_is_not_read_as_a_restaurant_identifier(monkeypatch, authenticated):
+    def unexpected(restaurant_id):
+        raise AssertionError(f"the show route received {restaurant_id}")
+
+    monkeypatch.setattr(restaurant_service, "get_restaurant", unexpected)
+    monkeypatch.setattr(
+        restaurant_service,
+        "restaurants_in_bounds",
+        lambda **kwargs: restaurant_service.RestaurantMapResult(items=(), truncated=False),
+    )
+
+    response = TestClient(app).get(
+        "/api/v1/restaurants/map?south=-33.5&west=-70.7&north=-33.4&east=-70.5"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "truncated": False}
+
+
+def test_map_validates_its_rectangle(monkeypatch, authenticated):
+    client = TestClient(app)
+
+    assert client.get("/api/v1/restaurants/map?south=-33.5&west=-70.7").status_code == 422
+    assert (
+        client.get(
+            "/api/v1/restaurants/map?south=-91&west=-70.7&north=-33.4&east=-70.5"
+        ).status_code
+        == 422
+    )
+
+    monkeypatch.setattr(
+        restaurant_service,
+        "restaurants_in_bounds",
+        lambda **kwargs: (_ for _ in ()).throw(restaurant_service.InvalidMapBoundsError("zoom in")),
+    )
+    too_large = client.get("/api/v1/restaurants/map?south=-40&west=-80&north=-10&east=-60")
+    assert too_large.status_code == 422
+    assert too_large.json()["detail"][0]["loc"] == ["query", "bounds"]
+
+
+def test_map_requires_a_session():
+    assert (
+        TestClient(app)
+        .get("/api/v1/restaurants/map?south=-33.5&west=-70.7&north=-33.4&east=-70.5")
+        .status_code
+        == 401
+    )
+
+
+def test_nearby_passes_its_circle_and_serializes_the_distance(monkeypatch, authenticated):
+    restaurant = sample_restaurant()
+    received = {}
+
+    def restaurants_nearby(*, latitude, longitude, radius_metres, cuisine_style_slugs, limit):
+        received.update(
+            latitude=latitude,
+            longitude=longitude,
+            radius_metres=radius_metres,
+            cuisine_style_slugs=list(cuisine_style_slugs),
+            limit=limit,
+        )
+        return restaurant_service.RestaurantNearbyResult(
+            items=(restaurant_service.NearbyRestaurant.of(restaurant, 1234),),
+            truncated=False,
+        )
+
+    monkeypatch.setattr(restaurant_service, "restaurants_nearby", restaurants_nearby)
+
+    response = TestClient(app).get(
+        "/api/v1/restaurants/nearby"
+        "?latitude=-33.4372&longitude=-70.6506&radius=2000"
+        "&cuisine_style=chilena&cuisine_style=peruana&limit=10"
+    )
+
+    assert response.status_code == 200
+    assert received == {
+        "latitude": -33.4372,
+        "longitude": -70.6506,
+        "radius_metres": 2000,
+        "cuisine_style_slugs": ["chilena", "peruana"],
+        "limit": 10,
+    }
+    payload = response.json()
+    assert payload["truncated"] is False
+    assert payload["items"][0]["distance_m"] == 1234
+    assert payload["items"][0]["address"] == restaurant.address
+    assert payload["items"][0]["cuisine_styles"][0]["slug"] == "chilena"
+
+
+def test_nearby_works_without_a_style_filter(monkeypatch, authenticated):
+    received = {}
+
+    def restaurants_nearby(**kwargs):
+        received.update(kwargs)
+        return restaurant_service.RestaurantNearbyResult(items=(), truncated=False)
+
+    monkeypatch.setattr(restaurant_service, "restaurants_nearby", restaurants_nearby)
+
+    response = TestClient(app).get(
+        "/api/v1/restaurants/nearby?latitude=-33.4&longitude=-70.6&radius=1000"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "truncated": False}
+    assert list(received["cuisine_style_slugs"]) == []
+
+
+def test_nearby_validates_its_circle(monkeypatch, authenticated):
+    client = TestClient(app)
+
+    assert client.get("/api/v1/restaurants/nearby?latitude=-33.4").status_code == 422
+    assert (
+        client.get("/api/v1/restaurants/nearby?latitude=-33.4&longitude=-70.6&radius=0").status_code
+        == 422
+    )
+    assert (
+        client.get(
+            "/api/v1/restaurants/nearby?latitude=-91&longitude=-70.6&radius=1000"
+        ).status_code
+        == 422
+    )
+
+    monkeypatch.setattr(
+        restaurant_service,
+        "restaurants_nearby",
+        lambda **kwargs: (_ for _ in ()).throw(
+            restaurant_service.InvalidNearbySearchError("radius must not exceed 50000 metres")
+        ),
+    )
+    too_far = client.get("/api/v1/restaurants/nearby?latitude=-33.4&longitude=-70.6&radius=40000")
+    assert too_far.status_code == 422
+    assert too_far.json()["detail"][0]["loc"] == ["query", "radius"]
+
+    monkeypatch.setattr(
+        restaurant_service,
+        "restaurants_nearby",
+        lambda **kwargs: (_ for _ in ()).throw(
+            restaurant_service.UnknownCuisineStylesError(["marciana"])
+        ),
+    )
+    unknown_style = client.get(
+        "/api/v1/restaurants/nearby?latitude=-33.4&longitude=-70.6&radius=1000"
+        "&cuisine_style=marciana"
+    )
+    assert unknown_style.status_code == 422
+
+
+def test_nearby_requires_a_session():
+    assert (
+        TestClient(app)
+        .get("/api/v1/restaurants/nearby?latitude=-33.4&longitude=-70.6&radius=1000")
+        .status_code
+        == 401
+    )
+
+
+def test_detail_and_gallery_map_their_domain_errors(monkeypatch, authenticated):
+    restaurant_id = uuid4()
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        restaurant_service,
+        "get_restaurant",
+        lambda identifier: (_ for _ in ()).throw(restaurant_service.RestaurantNotFoundError()),
+    )
+    assert client.get(f"/api/v1/restaurants/{restaurant_id}/photos").status_code == 404
+
+    monkeypatch.setattr(restaurant_service, "get_restaurant", lambda identifier: None)
+    monkeypatch.setattr(
+        photo_service,
+        "list_restaurant_photos",
+        lambda *args, **kwargs: (_ for _ in ()).throw(InvalidCursorError()),
+    )
+    assert client.get(f"/api/v1/restaurants/{restaurant_id}/photos?cursor=roto").status_code == 422
+
+    monkeypatch.setattr(
+        photo_service,
+        "list_restaurant_photos",
+        lambda *args, **kwargs: (_ for _ in ()).throw(photo_service.PhotoStoreError()),
+    )
+    assert client.get(f"/api/v1/restaurants/{restaurant_id}/photos").status_code == 503
+
+
+def test_detail_and_gallery_require_a_session():
+    restaurant_id = uuid4()
+    client = TestClient(app)
+
+    assert client.get(f"/api/v1/restaurants/{restaurant_id}").status_code == 401
+    assert client.get(f"/api/v1/restaurants/{restaurant_id}/photos").status_code == 401
 
 
 def test_create_returns_resource_and_location(monkeypatch, authenticated):
@@ -159,8 +420,10 @@ def test_domain_errors_map_to_http_statuses(monkeypatch, authenticated):
     restaurant_id = uuid4()
     monkeypatch.setattr(
         restaurant_service,
-        "get_restaurant",
-        lambda identifier: (_ for _ in ()).throw(restaurant_service.RestaurantNotFoundError()),
+        "get_restaurant_detail",
+        lambda identifier, **kwargs: (_ for _ in ()).throw(
+            restaurant_service.RestaurantNotFoundError()
+        ),
     )
     assert TestClient(app).get(f"/api/v1/restaurants/{restaurant_id}").status_code == 404
 

@@ -1,4 +1,5 @@
 import { ApiError } from "./api.js";
+import { clearOtherUsers, clearUserData } from "./offline-feed.js";
 
 export const AUTH_STATES = Object.freeze({
   LOADING: "loading",
@@ -17,6 +18,8 @@ const MESSAGES = Object.freeze({
   logout: "Cerrando la sesión en el backend…",
   loggedOut: "La sesión se cerró correctamente.",
   sessionLost: "La sesión caducó o fue revocada. Inicia sesión nuevamente.",
+  offlineLogin: "No hay conexión a Internet. Inicia sesión requiere estar online.",
+  offlineLogout: "No hay conexión a Internet. Cerrar sesión requiere estar online.",
 });
 
 function unavailableMessage(error) {
@@ -48,6 +51,15 @@ export function createAuthController({ api, onStateChange = () => {} }) {
     transition(AUTH_STATES.LOADING, { message, kind: "neutral" });
     try {
       const session = await api.session();
+
+      if (session?.user?.id) {
+        try {
+          await clearOtherUsers(session.user.id);
+        } catch (dbErr) {
+          console.warn("No se pudieron limpiar los datos de otros usuarios:", dbErr);
+        }
+      }
+
       return transition(AUTH_STATES.AUTHENTICATED, {
         session,
         message: MESSAGES.authenticated,
@@ -65,6 +77,13 @@ export function createAuthController({ api, onStateChange = () => {} }) {
   }
 
   async function login(credentials) {
+    if (typeof window !== 'undefined' && navigator.onLine === false) {
+      return transition(AUTH_STATES.UNAVAILABLE, {
+        message: MESSAGES.offlineLogin,
+        kind: "error",
+      });
+    }
+
     transition(AUTH_STATES.LOADING, {
       message: "Enviando las credenciales al backend…",
       kind: "neutral",
@@ -84,12 +103,37 @@ export function createAuthController({ api, onStateChange = () => {} }) {
   }
 
   async function logout() {
+    const currentUserId = state?.session?.user?.id;
+
+    if (typeof window !== 'undefined' && navigator.onLine === false) {
+      return transition(AUTH_STATES.UNAVAILABLE, {
+        message: MESSAGES.offlineLogout,
+        kind: "error",
+      });
+    }
+
     transition(AUTH_STATES.LOADING, { message: MESSAGES.logout, kind: "neutral" });
     try {
       await api.logout();
+
+      if (currentUserId) {
+        try {
+          await clearUserData(currentUserId);
+        } catch (dbErr) {
+          console.warn("No se pudo limpiar IndexedDB del usuario:", dbErr);
+        }
+      }
+
       return anonymous(MESSAGES.loggedOut, "success");
     } catch (error) {
       if (isUnauthorized(error)) {
+        if (currentUserId) {
+          try {
+            await clearUserData(currentUserId);
+          } catch (dbErr) {
+            console.warn("No se pudo limpiar IndexedDB del usuario:", dbErr);
+          }
+        }
         return anonymous(MESSAGES.loggedOut, "success");
       }
       return transition(AUTH_STATES.UNAVAILABLE, {

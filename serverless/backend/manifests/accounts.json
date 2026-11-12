@@ -8,6 +8,7 @@
     "app/api/countries.py",
     "app/api/dependencies.py",
     "app/api/users.py",
+    "app/api/push.py",
     "app/core/__init__.py",
     "app/core/config.py",
     "app/core/countries.py",
@@ -24,6 +25,7 @@
     "app/schemas/__init__.py",
     "app/schemas/activity.py",
     "app/schemas/users.py",
+    "app/schemas/push.py",
     "app/services/__init__.py",
     "app/services/activity.py",
     "app/services/auth.py",
@@ -32,6 +34,7 @@
     "app/services/notifications.py",
     "app/services/restaurants.py",
     "app/services/users.py",
+    "app/services/push_subscriptions.py",
     "app/services/visibility.py"
   ],
   "requirements": "requirements/accounts.txt"

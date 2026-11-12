@@ -1,22 +1,25 @@
-"""Extensiones del grupo: mantener vacías en el primer despliegue docente.
+"""Tablas y migraciones aditivas que pertenecen al grupo."""
 
-Registrar tablas no crea endpoints ni implementa un emisor. Evitar importar
-Pillow o bibliotecas Web Push aquí: este módulo lo usan las funciones HTTP.
-"""
+from sqlalchemy import Column, DateTime, Index, String, Table, Uuid, text
 
 
-def register_tables(metadata) -> None:
-    """Agregar Table(..., metadata, ...) de suscripciones y extensiones propias.
-
-    Se llama al construir los modelos compartidos, sin conectarse a la BD.
-    No existe un esquema docente de suscripciones que haya que adoptar.
-    """
+def register_tables(metadata):
+    """Registra la tabla de suscripciones para todas las Lambdas y mantenimiento."""
+    subscriptions = Table(
+        "push_subscriptions",
+        metadata,
+        Column("id", Uuid(as_uuid=True), primary_key=True),
+        Column("user_id", Uuid(as_uuid=True), nullable=False),
+        Column("endpoint", String(500), nullable=False, unique=True),
+        Column("p256dh", String(255), nullable=False),
+        Column("auth", String(255), nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False,
+               server_default=text("CURRENT_TIMESTAMP")),
+    )
+    Index("ix_push_subscriptions_user_id", subscriptions.c.user_id)
+    return subscriptions
 
 
 def migrate_schema(engine) -> None:
-    """Aplicar cambios aditivos explícitos, sólo desde mantenimiento local.
-
-    Una DDL por transacción y cambios idempotentes. Este hook NO interpreta
-    diferencias de columnas ni las aplica automáticamente. No borrar tablas,
-    reinicializar registros o sobrescribir las suscripciones existentes.
-    """
+    """No se requiere ALTER: prepare_schema crea tabla e índice de forma idempotente."""
+    del engine

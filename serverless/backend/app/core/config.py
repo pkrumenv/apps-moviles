@@ -47,11 +47,19 @@ class Settings(BaseSettings):
     media_presigned_url_expiration_seconds: int = Field(default=300, ge=1, le=3600)
     notifications_enabled: bool = False
     notifications_function_name: str | None = None
+    vapid_public_key: str | None = None
+    vapid_private_key: str | None = None
+    vapid_subject: str = "mailto:foodie-notifications@example.com"
     model_config = SettingsConfigDict(extra="ignore")
 
     @field_validator("media_s3_bucket", "media_s3_region", mode="before")
     @classmethod
     def empty_media_setting_is_none(cls, value):
+        return None if value == "" else value
+
+    @field_validator("vapid_public_key", "vapid_private_key", mode="before")
+    @classmethod
+    def empty_vapid_setting_is_none(cls, value):
         return None if value == "" else value
 
     @model_validator(mode="after")

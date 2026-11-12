@@ -326,4 +326,4 @@ comments = Table(
 Index("ix_comments_photo_created_id", comments.c.photo_id, comments.c.created_at, comments.c.id)
 Index("ix_comments_parent_created_id", comments.c.parent_id, comments.c.created_at, comments.c.id)
 
-register_tables(metadata)
+push_subscriptions = register_tables(metadata)

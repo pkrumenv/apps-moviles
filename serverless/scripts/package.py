@@ -181,7 +181,12 @@ def _load_manifest(root: Path, name: str) -> tuple[dict[str, Path], Path]:
 
 
 def _pip_command(
-    target: Path, requirements: Path, python_version: str, architecture: str
+    target: Path,
+    requirements: Path,
+    python_version: str,
+    architecture: str,
+    *,
+    wheelhouse: Path | None = None,
 ) -> list[str]:
     if python_version != "3.14":
         raise PackageError(
@@ -212,10 +217,36 @@ def _pip_command(
     # Leaving ABI selection to pip also admits CPython's older stable-ABI wheels.
     for minor in range(34, 16, -1):
         command.extend(["--platform", f"manylinux_2_{minor}_{machine}"])
+    if wheelhouse is not None:
+        # http-ece is pure Python but PyPI publishes it as an sdist. Build a
+        # universal wheel locally, then keep the cross-platform install binary-only.
+        command.extend(["--find-links", str(wheelhouse)])
     command.extend(
         ["--platform", f"manylinux2014_{machine}", "--requirement", str(requirements)]
     )
     return command
+
+
+def _build_http_ece_wheel(wheelhouse: Path) -> None:
+    """Build http-ece's platform-independent wheel for the Lambda resolver."""
+    wheelhouse.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "--isolated",
+            "--disable-pip-version-check",
+            "wheel",
+            "--no-deps",
+            "--wheel-dir",
+            str(wheelhouse),
+            "http-ece>=1.1.0",
+        ],
+        check=True,
+    )
+    if not list(wheelhouse.glob("http_ece-*-py3-none-any.whl")):
+        raise PackageError("http-ece did not produce a universal Python wheel")
 
 
 def _write_zip(directory: Path, destination: Path) -> None:
@@ -268,12 +299,21 @@ def build_packages(
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="lambda-package-", dir=output) as workspace:
         temporary = Path(workspace)
+        wheelhouse = temporary / "wheels"
         for name, (sources, requirements) in manifests.items():
             target = temporary / name
             target.mkdir()
             try:
+                if name == "notifications":
+                    _build_http_ece_wheel(wheelhouse)
                 subprocess.run(
-                    _pip_command(target, requirements, python_version, architecture),
+                    _pip_command(
+                        target,
+                        requirements,
+                        python_version,
+                        architecture,
+                        wheelhouse=wheelhouse if name == "notifications" else None,
+                    ),
                     check=True,
                     cwd=root,
                 )

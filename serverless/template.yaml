@@ -516,6 +516,13 @@ Resources:
       RouteKey: GET /api/v1/countries
       AuthorizationType: NONE
       Target: !Sub 'integrations/${AccountsIntegration}'
+  PushRoutes:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: ANY /api/v1/push/{proxy+}
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${AccountsIntegration}'
   PhotoUploadRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:

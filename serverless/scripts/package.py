@@ -245,7 +245,7 @@ def _build_http_ece_wheel(wheelhouse: Path) -> None:
         ],
         check=True,
     )
-    if not list(wheelhouse.glob("http_ece-*-py3-none-any.whl")):
+    if not list(wheelhouse.glob("http_ece-*-none-any.whl")):
         raise PackageError("http-ece did not produce a universal Python wheel")
 
 

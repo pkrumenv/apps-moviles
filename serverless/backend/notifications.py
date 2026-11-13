@@ -71,6 +71,8 @@ def handler(event, context):
                 data=payload,
                 vapid_private_key=settings.vapid_private_key,
                 vapid_claims={"sub": settings.vapid_subject},
+                timeout=5,
+                ttl=3600,
             )
             sent += 1
         except WebPushException as error:

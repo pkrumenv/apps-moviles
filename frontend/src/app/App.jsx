@@ -115,8 +115,8 @@ function AppLayout() {
 
   return (
     <>
-      <AppBar position="sticky" color="primary" elevation={0}>
-        <Toolbar sx={{ width: "min(100% - 24px, 1100px)", mx: "auto", px: "0 !important", gap: 1 }}>
+      <AppBar position="fixed" color="primary" elevation={0} sx={{ top: 0, pt: "env(safe-area-inset-top, 0px)" }}>
+        <Toolbar sx={{ width: "min(100% - 24px, 1100px)", minHeight: { xs: 56, sm: 64 }, mx: "auto", px: "0 !important", gap: 1 }}>
           <Typography component={RouterLink} to="/feed" variant="h6" color="primary.contrastText" sx={{ textDecoration: "none", mr: "auto" }}>
             Foodie
           </Typography>
@@ -128,12 +128,13 @@ function AppLayout() {
           </IconButton>
         </Toolbar>
       </AppBar>
+      <Toolbar aria-hidden="true" sx={{ minHeight: { xs: "calc(56px + env(safe-area-inset-top, 0px))", sm: "calc(64px + env(safe-area-inset-top, 0px))" } }} />
       {logoutError && <Container maxWidth="md" sx={{ pt: 2 }}><Alert severity="error">{logoutError}</Alert></Container>}
       <Outlet />
       <BottomNavigation
         showLabels
         value={location.pathname.startsWith("/feed") ? "feed" : location.pathname.startsWith("/explore") || location.pathname.startsWith("/restaurants") ? "search" : location.pathname.startsWith("/notifications") ? "notifications" : location.pathname.startsWith("/profile") ? "profile" : false}
-        sx={{ position: "fixed", inset: "auto 0 0", zIndex: (theme) => theme.zIndex.appBar, borderTop: 1, borderColor: "divider", bgcolor: "primary.light" }}
+        sx={{ position: "fixed", left: 0, right: 0, bottom: 0, height: "calc(64px + env(safe-area-inset-bottom, 0px))", pb: "env(safe-area-inset-bottom, 0px)", boxSizing: "border-box", zIndex: (theme) => theme.zIndex.appBar, borderTop: 1, borderColor: "divider", bgcolor: "primary.light" }}
       >
         <BottomNavigationAction label="Feed" value="feed" icon={<DynamicFeedIcon />} onClick={() => navigate("/feed")} />
         <BottomNavigationAction label="Búsqueda" value="search" icon={<SearchIcon />} onClick={() => navigate("/explore")} />

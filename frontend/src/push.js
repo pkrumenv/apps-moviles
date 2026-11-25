@@ -4,6 +4,7 @@ export const PUSH_STATES = Object.freeze({
   IDLE: "idle",
   SUBSCRIBING: "subscribing",
   SUBSCRIBED: "subscribed",
+  PENDING: "pending_registration",
   UNSUBSCRIBING: "unsubscribing",
   ERROR: "error",
 });
@@ -37,6 +38,19 @@ function arrayBufferToBase64Url(buffer) {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
+function pushFailureMessage(action, error) {
+  const actionText = action === "activar" ? "activar" : "desactivar";
+  const browserErrors = {
+    NotAllowedError: "El navegador bloqueó la solicitud. Revisa los permisos de notificaciones del sitio.",
+    InvalidStateError: "El service worker todavía no está listo. Recarga la página e inténtalo de nuevo.",
+    AbortError: "La operación de notificaciones fue cancelada.",
+  };
+  const detail = browserErrors[error?.name]
+    // ApiError messages are translated by the shared HTTP client.
+    || (error?.kind ? error.message : "Revisa la conexión y los permisos del navegador.");
+  return `No fue posible ${actionText} las notificaciones: ${detail}`;
+}
+
 export function createPushController({ api, onStateChange = () => {} }) {
   let state;
 
@@ -61,8 +75,8 @@ export function createPushController({ api, onStateChange = () => {} }) {
       const registration = await navigator.serviceWorker.ready;
       const existing = await registration.pushManager.getSubscription();
       if (existing) {
-        return transition(PUSH_STATES.SUBSCRIBED, {
-          message: "Las notificaciones push están activas.",
+        return transition(PUSH_STATES.PENDING, {
+          message: "Hay una suscripción en este dispositivo. Confirma su registro para esta cuenta.",
           endpoint: existing.endpoint,
         });
       }
@@ -81,10 +95,14 @@ export function createPushController({ api, onStateChange = () => {} }) {
       });
     }
 
-    transition(PUSH_STATES.SUBSCRIBING, { message: "Solicitando permiso…" });
+    transition(PUSH_STATES.SUBSCRIBING, { message: "Activando notificaciones…" });
 
     try {
-      const permission = await Notification.requestPermission();
+      const permission = Notification.permission === "granted"
+        ? "granted"
+        : Notification.permission === "default"
+          ? await Notification.requestPermission()
+          : Notification.permission;
       if (permission !== "granted") {
         return transition(PUSH_STATES.DENIED, {
           message: "No se concedió el permiso de notificaciones.",
@@ -93,10 +111,14 @@ export function createPushController({ api, onStateChange = () => {} }) {
 
       const { public_key: vapidPublicKey } = await api.push.vapidKey();
       const registration = await navigator.serviceWorker.ready;
-      const subscription = await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
-      });
+      const applicationServerKey = urlBase64ToUint8Array(vapidPublicKey);
+      let subscription = await registration.pushManager.getSubscription();
+      const existingKey = subscription?.options?.applicationServerKey;
+      if (subscription && existingKey && arrayBufferToBase64Url(existingKey) !== vapidPublicKey) {
+        await subscription.unsubscribe();
+        subscription = null;
+      }
+      subscription ||= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
 
       const p256dhKey = subscription.getKey("p256dh");
       const authKey = subscription.getKey("auth");
@@ -115,7 +137,7 @@ export function createPushController({ api, onStateChange = () => {} }) {
       });
     } catch (error) {
       return transition(PUSH_STATES.ERROR, {
-        message: `No fue posible activar las notificaciones: ${error.message}`,
+        message: pushFailureMessage("activar", error),
       });
     }
   }
@@ -127,15 +149,15 @@ export function createPushController({ api, onStateChange = () => {} }) {
       const subscription = await registration.pushManager.getSubscription();
       if (subscription) {
         const { endpoint } = subscription;
-        await subscription.unsubscribe();
         await api.push.unsubscribe(endpoint);
+        await subscription.unsubscribe();
       }
       return transition(PUSH_STATES.IDLE, {
         message: "Notificaciones push desactivadas.",
       });
     } catch (error) {
       return transition(PUSH_STATES.ERROR, {
-        message: `No fue posible desactivar las notificaciones: ${error.message}`,
+        message: pushFailureMessage("desactivar", error),
       });
     }
   }

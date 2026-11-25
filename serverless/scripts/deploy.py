@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from urllib.parse import urlparse
 import uuid
 
 import boto3
@@ -97,6 +98,15 @@ def load_config(filename: Path) -> dict:
         raise DeploymentError("package_manager debe ser npm, pnpm o yarn.")
     if not isinstance(data.get("notifications_enabled", False), bool):
         raise DeploymentError("notifications_enabled debe ser true o false.")
+    if data.get("notifications_enabled", False):
+        subject = data.get("vapid_subject", "")
+        parsed_subject = urlparse(subject)
+        valid_mailto = parsed_subject.scheme == "mailto" and "@" in parsed_subject.path
+        valid_https = parsed_subject.scheme == "https" and bool(parsed_subject.netloc)
+        if not (valid_mailto or valid_https):
+            raise DeploymentError(
+                "vapid_subject debe ser un URI de contacto válido, como mailto:equipo@dominio.cl o https://dominio.cl/contacto."
+            )
     for key, value in data.get("frontend_environment", {}).items():
         if not key.startswith("VITE_") or any(
             word in key.upper()
@@ -373,13 +383,18 @@ def parameters_for(
     initializing_vapid = config.get("notifications_enabled", False) and not (
         previous or {}
     ).get("VapidPublicKey")
-    for key, value in {
+    vapid_values = {
         "VapidPrivateKey": os.environ.get("VAPID_PRIVATE_KEY", ""),
         "VapidPublicKey": config.get("vapid_public_key", ""),
         "VapidSubject": config.get("vapid_subject", ""),
-    }.items():
+    }
+    for key, value in vapid_values.items():
         if updating and not initializing_vapid:
-            result.append({"ParameterKey": key, "UsePreviousValue": True})
+            # Mantiene el par de claves registrado y permite corregir el contacto VAPID.
+            if key == "VapidSubject" and config.get("notifications_enabled", False):
+                result.append({"ParameterKey": key, "ParameterValue": value})
+            else:
+                result.append({"ParameterKey": key, "UsePreviousValue": True})
         else:
             result.append(
                 {

@@ -329,6 +329,7 @@ def photo_activity_statement(viewer_id: UUID) -> Select:
             author.c.handle.label("author_handle"),
             author.c.name.label("author_name"),
             author.c.nationality.label("author_nationality"),
+            photos.c.upload_group,
             restaurants.c.id.label("restaurant_id"),
             restaurants.c.name.label("restaurant_name"),
             restaurants.c.address.label("restaurant_address"),
@@ -364,11 +365,13 @@ def photo_activity_item(rows: Sequence[Mapping]) -> dict:
     """
     first = rows[0]
     published_at = utc_timestamp(first["created_at"])
+    activity_id = first["upload_group"] or first["id"]
     return {
         "type": PHOTO_TYPE,
         "occurred_at": published_at,
         "published_at": published_at,
         PHOTO_TYPE: {
+            "id": activity_id,
             "kind": first["kind"],
             "visibility": first["visibility"],
             "author": user_summary(first),

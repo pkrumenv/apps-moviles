@@ -8,23 +8,118 @@ export class ApiError extends Error {
   }
 }
 
-export function errorDetail(payload, fallback) {
+const SERVER_ERROR_MESSAGES = new Map([
+  ["invalid credentials", "El correo o la contraseña no son válidos."],
+  ["authentication service unavailable", "El servicio de autenticación no está disponible. Inténtalo más tarde."],
+  ["email already registered", "Este correo electrónico ya está registrado."],
+  ["handle already taken", "Este nombre de usuario ya está en uso."],
+  ["resource not found", "No encontramos el contenido solicitado."],
+  ["user not found", "No encontramos esa cuenta."],
+  ["restaurant not found", "No encontramos ese restaurante."],
+  ["restaurant service unavailable", "El servicio de restaurantes no está disponible. Inténtalo más tarde."],
+  ["evaluation service unavailable", "El servicio de evaluaciones no está disponible. Inténtalo más tarde."],
+  ["photo service unavailable", "El servicio de fotos no está disponible. Inténtalo más tarde."],
+  ["comment service unavailable", "El servicio de comentarios no está disponible. Inténtalo más tarde."],
+  ["visit service unavailable", "El servicio de visitas no está disponible. Inténtalo más tarde."],
+  ["review service unavailable", "El servicio de reseñas no está disponible. Inténtalo más tarde."],
+  ["feed service unavailable", "El feed no está disponible. Inténtalo más tarde."],
+  ["user service unavailable", "El servicio de usuarios no está disponible. Inténtalo más tarde."],
+  ["push notifications are not configured on this deployment", "Las notificaciones push no están configuradas en este despliegue."],
+  ["push subscription service unavailable", "El servicio de notificaciones no está disponible. Inténtalo más tarde."],
+  ["media service unavailable", "El servicio de archivos multimedia no está disponible. Inténtalo más tarde."],
+  ["invalid cursor", "No se pudo continuar la lista. Actualiza la página e inténtalo de nuevo."],
+  ["untrusted request origin", "La solicitud no proviene de un sitio autorizado. Recarga la aplicación e inténtalo de nuevo."],
+  ["not authenticated", "Tu sesión no está activa. Inicia sesión para continuar."],
+  ["a restaurant with the same name and address already exists", "Ya existe un restaurante con ese nombre y dirección."],
+  ["you already evaluated this restaurant", "Ya evaluaste este restaurante."],
+  ["this photograph already carries a review", "Esta foto ya tiene una reseña."],
+  ["photo exceeds the configured upload limit", "La foto supera el tamaño máximo permitido."],
+  ["photo must be a valid jpeg, png, or webp image", "El archivo debe ser una imagen JPEG, PNG o WebP válida."],
+  ["occurred_at must carry a time zone", "La fecha y hora de la visita deben incluir una zona horaria."],
+  ["occurred_at must not be in the future", "La fecha del check-in no puede estar en el futuro."],
+  ["rating must be a whole number", "La calificación debe ser un número entero."],
+  ["a review cannot be empty", "Escribe el texto de la reseña."],
+  ["a review is written by whoever took the photograph", "Solo quien subió la foto puede reseñarla."],
+  ["only a photograph of a dish can be reviewed", "Solo se puede reseñar una foto de un plato."],
+  ["a review cannot be more visible than its photograph", "La reseña no puede ser más visible que la foto asociada."],
+  ["visibility must be public or private", "Selecciona si la actividad será pública o privada."],
+  ["comment text cannot be blank", "Escribe un comentario antes de publicarlo."],
+  ["a private photograph has no conversation", "No se puede comentar una foto privada."],
+  ["nobody follows themself", "No puedes seguirte a ti misma."],
+]);
+
+const HTTP_ERROR_MESSAGES = {
+  400: "La solicitud no es válida. Revisa los datos e inténtalo de nuevo.",
+  401: "Tu sesión no es válida o ha caducado. Inicia sesión de nuevo.",
+  403: "No tienes permiso para realizar esta acción.",
+  404: "No encontramos el contenido solicitado.",
+  409: "No se pudo completar la acción porque entra en conflicto con información existente.",
+  413: "El archivo supera el tamaño máximo permitido.",
+  415: "El tipo de archivo no es compatible.",
+  422: "Revisa los datos ingresados e inténtalo de nuevo.",
+  429: "Se hicieron demasiadas solicitudes. Espera un momento e inténtalo de nuevo.",
+};
+
+function localizedFallback(fallback, status) {
+  if (typeof status === "number") {
+    if (HTTP_ERROR_MESSAGES[status]) return HTTP_ERROR_MESSAGES[status];
+    if (status >= 500) return "El servidor no pudo completar la solicitud. Inténtalo más tarde.";
+  }
+  return fallback || "No se pudo completar la solicitud. Inténtalo de nuevo.";
+}
+
+function translateServerMessage(message, fallback) {
+  if (typeof message !== "string" || !message.trim()) return null;
+  const trimmed = message.trim();
+  const translated = SERVER_ERROR_MESSAGES.get(trimmed.toLowerCase());
+  if (translated) return translated;
+
+  const searchLength = trimmed.match(/^Search term must be at least (\d+) characters long$/i);
+  if (searchLength) return `La búsqueda debe tener al menos ${searchLength[1]} caracteres.`;
+  if (/^Unknown cuisine styles:/i.test(trimmed)) {
+    return "Uno o más estilos de comida ya no están disponibles. Actualiza la lista e inténtalo de nuevo.";
+  }
+
+  // Preserve backend messages already written in Spanish; hide unknown English
+  // details behind a localized, status-aware message.
+  if (/[áéíóúñ¿¡]/i.test(trimmed) || /^(no |la |el |tu |este |esta |hay |ya |debes |revisa |selecciona )/i.test(trimmed)) {
+    return trimmed;
+  }
+  return fallback;
+}
+
+export function errorDetail(payload, fallback, status = null) {
+  // Keep the two-argument helper behavior for callers that already own the
+  // wording; HTTP requests below always pass a status and use Spanish copy.
+  if (status === null) {
+    const detail = payload?.detail ?? payload;
+    if (typeof detail === "string" && detail.trim()) return detail;
+    if (Array.isArray(detail)) {
+      const messages = detail.map((item) => (typeof item?.msg === "string" ? item.msg : null)).filter(Boolean);
+      if (messages.length) return messages.join(". ");
+    }
+    if (typeof detail?.message === "string" && detail.message.trim()) return detail.message;
+    return fallback;
+  }
+
+  const localizedDefault = localizedFallback(fallback, status);
   const detail = payload?.detail ?? payload;
   if (typeof detail === "string" && detail.trim()) {
-    return detail;
+    return translateServerMessage(detail, localizedDefault);
   }
   if (Array.isArray(detail)) {
     const messages = detail
-      .map((item) => (typeof item?.msg === "string" ? item.msg : null))
+      .map((item) => translateServerMessage(item?.msg, null))
       .filter(Boolean);
-    if (messages.length) {
+    if (messages.length === detail.length && messages.length) {
       return messages.join(". ");
     }
+    return localizedDefault;
   }
   if (typeof detail?.message === "string" && detail.message.trim()) {
-    return detail.message;
+    return translateServerMessage(detail.message, localizedDefault);
   }
-  return fallback;
+  return localizedDefault;
 }
 
 async function responsePayload(response) {
@@ -82,7 +177,7 @@ export function createApiClient(
 
     const payload = await responsePayload(response);
     if (!response.ok) {
-      throw new ApiError(errorDetail(payload, `HTTP ${response.status}`), {
+      throw new ApiError(errorDetail(payload, null, response.status), {
         kind: "http",
         status: response.status,
         payload,
@@ -126,7 +221,7 @@ export function createApiClient(
           try { onUnauthorized({ status: 401, payload }); } catch { /* Keep the HTTP error. */ }
         }
         if (xhr.status < 200 || xhr.status >= 300) {
-          finish(reject, new ApiError(errorDetail(payload, `HTTP ${xhr.status}`), {
+          finish(reject, new ApiError(errorDetail(payload, null, xhr.status), {
             kind: "http", status: xhr.status, payload,
           }));
           return;

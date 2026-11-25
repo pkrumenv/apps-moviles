@@ -16,6 +16,7 @@ MAX_RESULT_BYTES = 16 * 1024
 
 @lru_cache
 def _client():
+    """Reutiliza un cliente Lambda con tiempos acotados y sin reintentos."""
     return boto3.client(
         "lambda",
         config=Config(
@@ -27,6 +28,7 @@ def _client():
 
 
 def invoke_notifications(activity: ActivityNotification) -> None:
+    """Envía al emisor una actividad ya guardada y sus destinatarios resueltos."""
     if not settings.notifications_enabled:
         return
     payload = {
@@ -67,6 +69,7 @@ def invoke_notifications(activity: ActivityNotification) -> None:
 
 
 def install_notifier() -> None:
+    """Conecta el callback al guardar actividades en las Lambdas de dominio."""
     # Solo los productores necesitan un destino; el emisor también reutiliza
     # la configuración y el acceso DSQL, pero no invoca otra función emisora.
     if settings.notifications_enabled and not settings.notifications_function_name:

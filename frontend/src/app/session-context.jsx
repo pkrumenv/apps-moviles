@@ -99,24 +99,7 @@ export function SessionProvider({ children }) {
   const logout = useCallback(async () => {
     const userId = state.session?.user?.id;
     if (state.status === "offline") {
-      if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-        try {
-          const registration = await navigator.serviceWorker.ready;
-          const subscription = await registration.pushManager.getSubscription();
-          await subscription?.unsubscribe();
-        } catch (error) {
-          console.warn("No se pudo desactivar la suscripción push local:", error);
-        }
-      }
-      if (userId) {
-        try {
-          await clearUserData(userId);
-        } catch (error) {
-          console.warn("No se pudo limpiar IndexedDB al cerrar sesión:", error);
-        }
-      }
-      setState({ status: "anonymous", session: null, message: "Copia offline eliminada." });
-      return;
+      throw new ApiError("Necesitas conexión para cerrar sesión y eliminar la suscripción del servidor.", { kind: "network" });
     }
     setState({ status: "loading", session: state.session, message: null });
 
